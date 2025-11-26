@@ -1,0 +1,24 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "wails-contract-warn",
+  "outputfilename": "wails-contract-warn",
+  "frontend": {
+    "dir": "./frontend",
+    "install": "npm install",
+    "build": "npm run build",
+    "dev": "npm run dev",
+    "devServer": "http://localhost:34115",
+    "devServerUrl": "ws://localhost:34115"
+  },
+  "author": {
+    "name": "",
+    "email": ""
+  },
+  "info": {
+    "productName": "合约行情分析",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright...",
+    "comments": "基于 Wails + Vue + ECharts 的合约行情分析工具"
+  }
+}
+
