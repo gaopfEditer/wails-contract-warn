@@ -7,6 +7,7 @@
 <script>
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import * as echarts from 'echarts'
+import { getSignalConfig } from '../utils/signalTypes'
 
 export default {
   name: 'KLineChart',
@@ -18,6 +19,10 @@ export default {
     indicators: {
       type: Object,
       default: () => ({}),
+    },
+    alertSignals: {
+      type: Array,
+      default: () => [],
     },
     symbol: {
       type: String,
@@ -49,13 +54,60 @@ export default {
       const values = data.map(item => [item.open, item.close, item.low, item.high])
       const volumes = data.map(item => item.volume)
 
+      // 准备布林带数据
+      const bbUpper = props.indicators.BBUpper || []
+      const bbMiddle = props.indicators.BBMiddle || []
+      const bbLower = props.indicators.BBLower || []
+
+      // 准备预警信号标记点（根据信号类型显示不同图标和颜色）
+      const markPoints = props.alertSignals.map(signal => {
+        const config = getSignalConfig(signal.type)
+        return {
+          name: config.name,
+          coord: [signal.index, signal.price],
+          value: signal.price,
+          symbol: 'diamond',
+          symbolSize: 30 + (signal.strength || 0) * 10, // 根据强度调整大小
+          itemStyle: {
+            color: config.color,
+            borderColor: '#ffffff',
+            borderWidth: 2,
+          },
+          label: {
+            show: true,
+            formatter: config.icon,
+            fontSize: 16,
+            color: '#ffffff',
+            fontWeight: 'bold',
+          },
+          tooltip: {
+            formatter: () => {
+              const date = new Date(signal.time)
+              const timeStr = `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}:${date.getMinutes()}`
+              let tooltip = `${config.name}<br/>时间: ${timeStr}<br/>价格: ${signal.price.toFixed(2)}`
+              if (signal.lowerBand) {
+                tooltip += `<br/>下轨: ${signal.lowerBand.toFixed(2)}`
+              }
+              if (signal.upperBand) {
+                tooltip += `<br/>上轨: ${signal.upperBand.toFixed(2)}`
+              }
+              if (signal.strength) {
+                tooltip += `<br/>强度: ${(signal.strength * 100).toFixed(0)}%`
+              }
+              tooltip += `<br/>${config.description}`
+              return tooltip
+            },
+          },
+        }
+      })
+
       const option = {
         backgroundColor: 'transparent',
         animation: false,
         legend: {
           top: 10,
           left: 'center',
-          data: ['K线', 'MA5', 'MA10', 'MA20', 'MACD', 'Signal', 'Hist'],
+          data: ['K线', 'MA5', 'MA10', 'MA20', 'BB上轨', 'BB中轨', 'BB下轨', 'MACD', 'Signal', 'Hist'],
           textStyle: {
             color: '#ffffff',
           },
@@ -184,26 +236,8 @@ export default {
               borderColor0: '#ef5350',
             },
             markPoint: {
-              label: {
-                formatter: (param) => {
-                  return param != null ? Math.round(param.value) + '' : ''
-                },
-              },
-              data: [
-                {
-                  name: 'Mark',
-                  coord: ['2013/5/31', 2300],
-                  value: 2300,
-                  itemStyle: {
-                    color: 'rgb(41,60,85)',
-                  },
-                },
-              ],
-              tooltip: {
-                formatter: (param) => {
-                  return param.name + '<br>' + (param.data.coord || '')
-                },
-              },
+              data: markPoints,
+              animation: false,
             },
           },
           {
@@ -238,6 +272,50 @@ export default {
               color: '#8b5cf6',
             },
             symbol: 'none',
+          },
+          {
+            name: 'BB上轨',
+            type: 'line',
+            data: bbUpper.map(v => v || null),
+            smooth: true,
+            lineStyle: {
+              width: 1,
+              color: '#999',
+              type: 'dashed',
+            },
+            symbol: 'none',
+            itemStyle: {
+              opacity: 0.6,
+            },
+          },
+          {
+            name: 'BB中轨',
+            type: 'line',
+            data: bbMiddle.map(v => v || null),
+            smooth: true,
+            lineStyle: {
+              width: 1,
+              color: '#999',
+            },
+            symbol: 'none',
+            itemStyle: {
+              opacity: 0.6,
+            },
+          },
+          {
+            name: 'BB下轨',
+            type: 'line',
+            data: bbLower.map(v => v || null),
+            smooth: true,
+            lineStyle: {
+              width: 1,
+              color: '#999',
+              type: 'dashed',
+            },
+            symbol: 'none',
+            itemStyle: {
+              opacity: 0.6,
+            },
           },
           {
             name: 'Volume',
@@ -317,7 +395,7 @@ export default {
     })
 
     watch(
-      () => [props.klineData, props.indicators],
+      () => [props.klineData, props.indicators, props.alertSignals],
       () => {
         updateChart()
       },
@@ -343,4 +421,3 @@ export default {
   height: 100%;
 }
 </style>
-
