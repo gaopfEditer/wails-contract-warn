@@ -4,9 +4,9 @@
   "outputfilename": "wails-contract-warn",
   "frontend": {
     "dir": "./frontend",
-    "install": "npm install",
-    "build": "npm run build",
-    "dev": "npm run dev",
+    "install": "pnpm install",
+    "build": "pnpm run build",
+    "dev": "pnpm run dev",
     "devServer": "http://localhost:34115",
     "devServerUrl": "ws://localhost:34115"
   },
