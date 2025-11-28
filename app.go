@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"wails-contract-warn/api"
+	"wails-contract-warn/config"
 	"wails-contract-warn/database"
 	"wails-contract-warn/indicator"
 	"wails-contract-warn/logger"
@@ -21,11 +22,12 @@ import (
 
 // App 结构体（控制器层）
 type App struct {
-	ctx         context.Context
-	market      *service.MarketService
-	syncService *service.SyncService
-	proxyClient *api.ProxyClient
-	dbInit      bool
+	ctx                 context.Context
+	market              *service.MarketService
+	syncService         *service.SyncService
+	prioritySyncService *service.PrioritySyncService
+	proxyClient         *api.ProxyClient
+	dbInit              bool
 }
 
 // NewApp 创建新的应用实例
@@ -46,16 +48,24 @@ func (a *App) startup(ctx context.Context) {
 	a.market.Start()
 	logger.Info("市场数据服务已启动")
 
-	// 初始化数据库（如果配置了DSN）
-	// 注意：这里需要从配置文件读取DSN，暂时注释
-	// if dsn := getDBDSN(); dsn != "" {
-	// 	if err := database.InitDB(dsn); err != nil {
-	// 		logger.Errorf("数据库初始化失败: %v", err)
-	// 	} else {
-	// 		a.dbInit = true
-	// 		logger.Info("数据库初始化成功")
-	// 	}
-	// }
+	// 初始化数据库（从配置读取DSN）
+	dsn := config.GetDBDSN()
+	if dsn != "" {
+		logger.Infof("正在连接数据库: %s", maskDSN(dsn))
+		if err := database.InitDB(dsn); err != nil {
+			logger.Errorf("数据库初始化失败: %v", err)
+		} else {
+			a.dbInit = true
+			logger.Info("数据库连接成功，表结构已创建")
+
+			// 自动启动优先级同步服务
+			if _, err := a.StartPrioritySync(); err != nil {
+				logger.Errorf("启动优先级同步服务失败: %v", err)
+			}
+		}
+	} else {
+		logger.Warn("未配置数据库连接，将使用内存模式")
+	}
 
 	logger.Info("应用初始化完成")
 }
@@ -75,6 +85,11 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.syncService != nil {
 		a.syncService.Stop()
 		logger.Debug("同步服务已停止")
+	}
+
+	if a.prioritySyncService != nil {
+		a.prioritySyncService.Stop()
+		logger.Debug("优先级同步服务已停止")
 	}
 
 	if a.dbInit {
@@ -294,27 +309,72 @@ func (a *App) InitDatabase(dsn string) (string, error) {
 	return "数据库初始化成功", nil
 }
 
-// StartAutoSync 启动自动同步服务
+// StartAutoSync 启动自动同步服务（使用优先级同步）
 func (a *App) StartAutoSync(symbol string, intervalSeconds int) (string, error) {
 	if !a.dbInit {
 		return "", fmt.Errorf("数据库未初始化")
 	}
 
-	if a.syncService == nil {
-		a.syncService = service.NewSyncService(intervalSeconds)
+	// 使用优先级同步服务
+	if a.prioritySyncService == nil {
+		// 优先同步间隔：60秒，空闲同步间隔：300秒
+		a.prioritySyncService = service.NewPrioritySyncService(60, 300)
 	}
 
-	a.syncService.AddSymbol(symbol)
-
-	if !a.syncService.IsRunning() {
-		a.syncService.Start()
+	if !a.prioritySyncService.IsRunning() {
+		a.prioritySyncService.Start()
 	}
 
-	return "自动同步已启动", nil
+	return "优先级自动同步已启动（将优先同步热门币种的近期数据）", nil
+}
+
+// StartPrioritySync 启动优先级同步服务（从配置文件读取币种）
+func (a *App) StartPrioritySync() (string, error) {
+	if !a.dbInit {
+		return "", fmt.Errorf("数据库未初始化")
+	}
+
+	// 加载配置
+	syncConfig, err := config.GetSyncConfig()
+	if err != nil {
+		return "", fmt.Errorf("加载同步配置失败: %w", err)
+	}
+
+	// 创建优先级同步服务
+	priorityInterval := 60 // 优先同步间隔：60秒
+	idleInterval := syncConfig.IdleCheckIntervalSeconds
+	if idleInterval == 0 {
+		idleInterval = 300 // 默认5分钟
+	}
+
+	if a.prioritySyncService == nil {
+		a.prioritySyncService = service.NewPrioritySyncService(priorityInterval, idleInterval)
+	}
+
+	if !a.prioritySyncService.IsRunning() {
+		a.prioritySyncService.Start()
+		logger.Info("优先级同步服务已启动")
+	}
+
+	// 获取配置的币种数量
+	allSymbols, err := config.GetAllEnabledSymbols()
+	if err != nil {
+		return "", fmt.Errorf("获取币种配置失败: %w", err)
+	}
+
+	hotSymbols, _ := config.GetHotSymbols()
+	minorSymbols, _ := config.GetMinorSymbols()
+
+	return fmt.Sprintf("优先级同步服务已启动（热门币种: %d, 小币种: %d, 总计: %d）",
+		len(hotSymbols), len(minorSymbols), len(allSymbols)), nil
 }
 
 // StopAutoSync 停止自动同步
 func (a *App) StopAutoSync(symbol string) (string, error) {
+	if a.prioritySyncService != nil && a.prioritySyncService.IsRunning() {
+		a.prioritySyncService.Stop()
+		return "优先级同步服务已停止", nil
+	}
 	if a.syncService != nil {
 		a.syncService.RemoveSymbol(symbol)
 		return "已停止同步该交易对", nil
@@ -873,4 +933,28 @@ func (a *App) AnalyzeTestData(filename string) (string, error) {
 
 	logger.Infof("分析完成: 共检测到 %d 个信号，分布在 %d 种类型", len(allSignals), len(signalStats))
 	return string(jsonData), nil
+}
+
+// maskDSN 隐藏DSN中的密码（用于日志输出）
+func maskDSN(dsn string) string {
+	// 简单的密码隐藏：将密码部分替换为 ***
+	// 格式：user:password@tcp(host:port)/dbname
+	// 查找第一个 @ 符号，将 : 到 @ 之间的内容替换
+	atIndex := -1
+	colonIndex := -1
+	for i, c := range dsn {
+		if c == '@' {
+			atIndex = i
+			break
+		}
+		if c == ':' && colonIndex == -1 {
+			colonIndex = i
+		}
+	}
+
+	if atIndex > 0 && colonIndex > 0 && colonIndex < atIndex {
+		return dsn[:colonIndex+1] + "***" + dsn[atIndex:]
+	}
+
+	return dsn
 }

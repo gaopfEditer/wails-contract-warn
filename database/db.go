@@ -10,7 +10,7 @@ import (
 
 var DB *sql.DB
 
-// InitDB 初始化数据库连接
+// InitDB 初始化数据库连接并创建表结构
 func InitDB(dsn string) error {
 	var err error
 	DB, err = sql.Open("mysql", dsn)
@@ -26,6 +26,63 @@ func InitDB(dsn string) error {
 	// 测试连接
 	if err := DB.Ping(); err != nil {
 		return fmt.Errorf("数据库连接测试失败: %w", err)
+	}
+
+	// 自动创建表结构
+	if err := InitSchema(); err != nil {
+		return fmt.Errorf("创建表结构失败: %w", err)
+	}
+
+	return nil
+}
+
+// InitSchema 初始化数据库表结构
+func InitSchema() error {
+	if DB == nil {
+		return fmt.Errorf("数据库连接未初始化")
+	}
+
+	// 创建 klines_1m 表
+	createKlines1mSQL := `
+		CREATE TABLE IF NOT EXISTS klines_1m (
+			id BIGINT AUTO_INCREMENT PRIMARY KEY,
+			symbol VARCHAR(20) NOT NULL COMMENT '交易对，如 BTCUSDT',
+			open_time BIGINT NOT NULL COMMENT 'K线开盘时间（毫秒时间戳）',
+			open DECIMAL(20, 8) NOT NULL COMMENT '开盘价',
+			high DECIMAL(20, 8) NOT NULL COMMENT '最高价',
+			low DECIMAL(20, 8) NOT NULL COMMENT '最低价',
+			close DECIMAL(20, 8) NOT NULL COMMENT '收盘价',
+			volume DECIMAL(20, 8) NOT NULL COMMENT '成交量',
+			close_time BIGINT NOT NULL COMMENT 'K线收盘时间（毫秒时间戳）',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+			UNIQUE KEY uk_symbol_time (symbol, open_time),
+			INDEX idx_symbol_close_time (symbol, close_time),
+			INDEX idx_close_time (close_time)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='1分钟K线数据表（原始数据）';
+	`
+
+	_, err := DB.Exec(createKlines1mSQL)
+	if err != nil {
+		return fmt.Errorf("创建 klines_1m 表失败: %w", err)
+	}
+
+	// 创建 sync_status 表
+	createSyncStatusSQL := `
+		CREATE TABLE IF NOT EXISTS sync_status (
+			id INT AUTO_INCREMENT PRIMARY KEY,
+			symbol VARCHAR(20) NOT NULL COMMENT '交易对',
+			last_sync_time BIGINT NOT NULL DEFAULT 0 COMMENT '最后同步时间（毫秒时间戳）',
+			last_kline_time BIGINT NOT NULL DEFAULT 0 COMMENT '最后一条K线时间（毫秒时间戳）',
+			sync_count INT NOT NULL DEFAULT 0 COMMENT '同步次数',
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+			UNIQUE KEY uk_symbol (symbol)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='数据同步状态表';
+	`
+
+	_, err = DB.Exec(createSyncStatusSQL)
+	if err != nil {
+		return fmt.Errorf("创建 sync_status 表失败: %w", err)
 	}
 
 	return nil

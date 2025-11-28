@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 )
 
@@ -11,8 +12,18 @@ func GetDBDSN() string {
 		return dsn
 	}
 
-	// 默认配置（格式：user:password@tcp(host:port)/dbname?charset=utf8mb4&parseTime=True&loc=Local）
-	return ""
+	// 默认配置（远程MySQL数据库）
+	// 格式：user:password@tcp(host:port)/dbname?charset=utf8mb4&parseTime=True&loc=Local
+	host := "8.155.10.218"
+	port := "3306"
+	user := "root"
+	password := "123456"
+	dbname := "wails-contract-warn"
+
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
+		user, password, host, port, dbname)
+
+	return dsn
 }
 
 // GetSyncInterval 获取同步间隔（秒）
