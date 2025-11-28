@@ -621,11 +621,12 @@ func SyncSymbolHistoricalBackward(symbol string, startYear int, batchSize int) e
 	api := NewExchangeAPI()
 
 	// 计算目标时间范围
-	// 从1小时前开始，避免每次都获取到最新的一条数据而无法继续倒推
+	// 从10分钟前开始，避免每次都获取到最新的一条数据而无法继续倒推
+	// 跳过最近10分钟，防止最近时间增加导致的死循环
 	now := time.Now().UnixMilli()
-	oneHourAgo := now - int64(60*60*1000) // 1小时前
+	tenMinutesAgo := now - int64(10*60*1000) // 10分钟前
 	targetStart := time.Date(startYear, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
-	targetEnd := oneHourAgo // 从1小时前开始，而不是当前时间
+	targetEnd := tenMinutesAgo // 从10分钟前开始，跳过最近10分钟
 
 	// 查找缺失的时间段
 	missingRanges, err := database.FindMissingRanges(symbol, targetStart, targetEnd)
@@ -645,7 +646,7 @@ func SyncSymbolHistoricalBackward(symbol string, startYear int, batchSize int) e
 		missingRanges[i], missingRanges[j] = missingRanges[j], missingRanges[i]
 	}
 
-	logger.Infof("开始同步 %s [历史数据-按天倒推] 目标范围: %s ~ %s (起始年份: %d, 从1小时前开始)",
+	logger.Infof("开始同步 %s [历史数据-按天倒推] 目标范围: %s ~ %s (起始年份: %d, 跳过最近10分钟)",
 		symbol,
 		time.Unix(targetStart/1000, 0).Format("2006-01-02 15:04:05"),
 		time.Unix(targetEnd/1000, 0).Format("2006-01-02 15:04:05"),
@@ -668,9 +669,9 @@ func SyncSymbolHistoricalBackward(symbol string, startYear int, batchSize int) e
 
 		for currentDayEnd >= missingRange.StartTime {
 			// 检查是否超过 Gate.io 的限制（最多10000个数据点之前）
-			// 注意：这里使用 oneHourAgo 而不是 now，因为我们从1小时前开始同步
+			// 注意：这里使用 tenMinutesAgo 而不是 now，因为我们从10分钟前开始同步
 			maxPointsAgo := int64(10000 * 60 * 1000) // 10000分钟的毫秒数
-			minAllowedTime := oneHourAgo - maxPointsAgo
+			minAllowedTime := tenMinutesAgo - maxPointsAgo
 
 			// 如果结束时间太早，调整到允许的最早时间
 			if currentDayEnd < minAllowedTime {
@@ -682,20 +683,48 @@ func SyncSymbolHistoricalBackward(symbol string, startYear int, batchSize int) e
 				break
 			}
 
-			// 计算当天的开始时间（当天00:00:00）
-			currentDay := time.Unix(currentDayEnd/1000, 0)
+			// 计算当天的开始时间（当天00:00:00 UTC）
+			currentDay := time.Unix(currentDayEnd/1000, 0).UTC()
 			dayStart := time.Date(currentDay.Year(), currentDay.Month(), currentDay.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+
+			// 如果 dayStart >= currentDayEnd，说明已经到达当天的开始时间之前
+			// 应该直接跳到前一天，而不是拉取无效的时间范围
+			if dayStart >= currentDayEnd {
+				// 跳到前一天：前一天的 23:59:59.999 UTC
+				prevDay := currentDay.AddDate(0, 0, -1)
+				prevDayEnd := time.Date(prevDay.Year(), prevDay.Month(), prevDay.Day(), 23, 59, 59, 999, time.UTC).UnixMilli()
+
+				// 检查是否已经到达或超过起始时间
+				if prevDayEnd < missingRange.StartTime {
+					break
+				}
+
+				// 更新 currentDayEnd 为前一天，并添加调试日志
+				oldDayEnd := currentDayEnd
+				oldDayEndStr := time.Unix(oldDayEnd/1000, 0).UTC().Format("2006-01-02 15:04:05")
+				currentDayEnd = prevDayEnd
+				newDayEndStr := time.Unix(currentDayEnd/1000, 0).UTC().Format("2006-01-02 15:04:05")
+
+				// 防止死循环：如果跳转后的日期和跳转前相同，说明有问题，直接break
+				if prevDayEnd >= oldDayEnd {
+					logger.Errorf("[%s] ❌ 跳转逻辑错误：跳转后的时间 %s 大于等于跳转前的时间 %s，停止同步", symbol, newDayEndStr, oldDayEndStr)
+					break
+				}
+
+				logger.Infof("[%s] 当天数据已获取完毕，从 %s 跳到前一天: %s", symbol, oldDayEndStr, newDayEndStr)
+				continue
+			}
 
 			// 确保不超过缺失时间段的起始时间
 			if dayStart < missingRange.StartTime {
 				dayStart = missingRange.StartTime
 			}
 
-			// 显示当前批次信息（按天）
+			// 显示当前批次信息（按天，从00:00:00开始）
 			dayCount++
 			dayStartStr := time.Unix(dayStart/1000, 0).Format("2006-01-02 15:04:05")
 			dayEndStr := time.Unix(currentDayEnd/1000, 0).Format("2006-01-02 15:04:05")
-			logger.Infof("[%s] 第 %d 天: 倒推拉取 %s ~ %s (最多 %d 条)", symbol, dayCount, dayStartStr, dayEndStr, batchSize)
+			logger.Infof("[%s] 第 %d 天: 倒推拉取 %s (00:00:00) ~ %s (最多 %d 条)", symbol, dayCount, time.Unix(dayStart/1000, 0).Format("2006-01-02"), dayEndStr, batchSize)
 
 			// 从交易所拉取数据（从 dayStart 开始，到 currentDayEnd 结束）
 			logger.Infof("[%s] 正在请求API: startTime=%d (from=%s), endTime=%d (to=%s), limit=%d",
@@ -731,13 +760,17 @@ func SyncSymbolHistoricalBackward(symbol string, startYear int, batchSize int) e
 			}
 
 			if len(klines) == 0 {
-				// 没有新数据，可能已经同步到最新
-				logger.Infof("[%s] ⚠️ API返回空数据，继续向前倒推（前一天）", symbol)
-				// 向前倒推一天
-				currentDayEnd = dayStart - 1
-				if currentDayEnd < missingRange.StartTime {
+				// 没有新数据，当天的数据已获取完毕，跳到前一天
+				logger.Infof("[%s] ⚠️ API返回空数据，当天数据已获取完毕，跳到前一天", symbol)
+				// 使用 currentDay 而不是 dayStart，因为 dayStart 可能已经被调整过
+				currentDay := time.Unix(currentDayEnd/1000, 0)
+				prevDay := currentDay.AddDate(0, 0, -1)
+				prevDayEnd := time.Date(prevDay.Year(), prevDay.Month(), prevDay.Day(), 23, 59, 59, 999, time.UTC).UnixMilli()
+				if prevDayEnd < missingRange.StartTime {
 					break
 				}
+				currentDayEnd = prevDayEnd
+				logger.Infof("[%s] 跳到前一天: %s", symbol, time.Unix(currentDayEnd/1000, 0).Format("2006-01-02 15:04:05"))
 				continue
 			}
 
@@ -773,13 +806,39 @@ func SyncSymbolHistoricalBackward(symbol string, startYear int, batchSize int) e
 				return fmt.Errorf("更新同步状态失败: %w", err)
 			}
 
-			// 向前倒推：下一批从前一天开始（按天为单位）
-			// 计算前一天的结束时间（当前天的开始时间 - 1毫秒）
-			currentDayEnd = dayStart - 1
+			// 检查是否已经获取完当天的所有数据
+			firstKlineTime := klines[0].OpenTime
 
-			// 如果已经到达或超过起始时间，停止这个时间段
-			if currentDayEnd < missingRange.StartTime {
-				break
+			// 重新计算当天的开始时间（用于判断是否已获取到00:00:00）
+			currentDayForCheck := time.Unix(firstKlineTime/1000, 0)
+			dayStartForCheck := time.Date(currentDayForCheck.Year(), currentDayForCheck.Month(), currentDayForCheck.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+
+			// 如果第一条数据的时间戳 <= 当天的开始时间，说明已经获取到当天的开始（00:00:00），跳到前一天
+			// 或者如果返回的数据少于batchSize，说明已经拉完当天的数据，跳到前一天
+			if firstKlineTime <= dayStartForCheck || len(klines) < batchSize {
+				// 当天的数据已经获取完毕，跳到前一天
+				prevDay := currentDayForCheck.AddDate(0, 0, -1)
+				prevDayEnd := time.Date(prevDay.Year(), prevDay.Month(), prevDay.Day(), 23, 59, 59, 999, time.UTC).UnixMilli()
+
+				// 如果已经到达或超过起始时间，停止这个时间段
+				if prevDayEnd < missingRange.StartTime {
+					break
+				}
+
+				// 更新 currentDayEnd 为前一天
+				currentDayEnd = prevDayEnd
+				logger.Infof("[%s] 当天数据获取完毕（已获取到 %s），跳到前一天: %s",
+					symbol,
+					time.Unix(firstKlineTime/1000, 0).Format("2006-01-02 15:04:05"),
+					time.Unix(currentDayEnd/1000, 0).Format("2006-01-02 15:04:05"))
+			} else {
+				// 当天的数据还没获取完，继续从第一条数据的前一分钟开始
+				currentDayEnd = firstKlineTime - 1
+
+				// 如果已经到达或超过起始时间，停止这个时间段
+				if currentDayEnd < missingRange.StartTime {
+					break
+				}
 			}
 
 			// 避免请求过快，稍作延迟
