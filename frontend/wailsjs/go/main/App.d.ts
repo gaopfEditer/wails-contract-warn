@@ -25,6 +25,8 @@ export function StartAutoSync(arg1:string,arg2:number):Promise<string>;
 
 export function StartMarketDataStream(arg1:string,arg2:string):Promise<void>;
 
+export function StartPrioritySync():Promise<string>;
+
 export function StopAutoSync(arg1:string):Promise<string>;
 
 export function StopMarketDataStream(arg1:string):Promise<void>;

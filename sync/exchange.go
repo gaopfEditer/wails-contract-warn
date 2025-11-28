@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"wails-contract-warn/database"
+	"wails-contract-warn/logger"
 )
 
 // ExchangeAPI 交易所API接口
@@ -58,6 +60,11 @@ func (api *ExchangeAPI) fetchGateIOKLines(symbol, interval string, startTime, en
 	// Gate.io API: GET /api/v4/spot/candlesticks
 	// 参数: currency_pair, interval, from, to, limit
 	// interval: 1m, 5m, 15m, 30m, 1h, 4h, 1d
+	//
+	// Gate.io 限制：
+	// 1. 最多返回 1000 条数据
+	// 2. 最多只能获取最近 10000 个数据点（对于1分钟K线，约6.9天）
+	// 3. 如果设置了 from，不能超过 10000 个数据点之前
 
 	url := fmt.Sprintf("%s/spot/candlesticks", api.BaseURL)
 
@@ -66,17 +73,34 @@ func (api *ExchangeAPI) fetchGateIOKLines(symbol, interval string, startTime, en
 	params["currency_pair"] = symbol // Gate.io使用 BTC_USDT 格式
 	params["interval"] = interval
 
+	// Gate.io 限制：最多只能获取最近 10000 个数据点
+	// 对于 1 分钟 K 线，10000 点 = 10000 分钟 ≈ 6.9 天
+	maxPointsAgo := int64(10000 * 60 * 1000) // 10000分钟的毫秒数
+	now := time.Now().UnixMilli()
+
+	// 如果设置了 startTime，检查是否超过限制
 	if startTime > 0 {
-		params["from"] = strconv.FormatInt(startTime/1000, 10) // Gate.io使用秒级时间戳
+		minAllowedTime := now - maxPointsAgo
+		if startTime < minAllowedTime {
+			// 时间太早，不设置 from 参数，让 API 返回最近的数据
+			// 只设置 limit，从最新数据开始往前拉取
+		} else {
+			// 时间在允许范围内，设置 from 参数
+			params["from"] = strconv.FormatInt(startTime/1000, 10) // Gate.io使用秒级时间戳
+		}
 	}
-	if endTime > 0 {
-		params["to"] = strconv.FormatInt(endTime/1000, 10)
-	}
+
+	// 设置 limit（优先使用较小的值，避免一次性拉取太多）
 	if limit > 0 && limit <= 1000 {
 		params["limit"] = strconv.Itoa(limit)
 	} else if limit > 1000 {
 		params["limit"] = "1000" // Gate.io最大限制1000
+	} else {
+		// 默认拉取300条
+		params["limit"] = "300"
 	}
+
+	// 不设置 to 参数，让 API 返回到当前时间的数据
 
 	// 构建URL
 	url += "?"
@@ -89,30 +113,110 @@ func (api *ExchangeAPI) fetchGateIOKLines(symbol, interval string, startTime, en
 		first = false
 	}
 
+	logger.Infof("[Gate.io API] 请求URL: %s", url)
+
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 	}
 
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
-	}
-	defer resp.Body.Close()
+	// 重试机制：最多重试3次
+	maxRetries := 3
+	var resp *http.Response
+	var bodyBytes []byte
+	var err error
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API返回错误: %s, 响应: %s", resp.Status, string(body))
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// 重试前等待，使用指数退避：1s, 2s, 4s
+			waitTime := time.Duration(1<<uint(attempt-1)) * time.Second
+			logger.Warnf("[Gate.io API] 第 %d 次重试，等待 %v 后重试...", attempt, waitTime)
+			time.Sleep(waitTime)
+		}
+
+		resp, err = client.Get(url)
+		if err != nil {
+			// 网络错误，可以重试
+			logger.Warnf("[Gate.io API] 请求失败 (尝试 %d/%d): %v", attempt+1, maxRetries+1, err)
+			if attempt < maxRetries {
+				continue // 继续重试
+			}
+			logger.Errorf("[Gate.io API] 请求失败，已重试 %d 次: %v", maxRetries+1, err)
+			return nil, fmt.Errorf("请求失败（已重试%d次）: %w", maxRetries, err)
+		}
+
+		// 读取响应体
+		bodyBytes, err = io.ReadAll(resp.Body)
+		resp.Body.Close() // 立即关闭，避免资源泄漏
+
+		if err != nil {
+			logger.Warnf("[Gate.io API] 读取响应失败 (尝试 %d/%d): %v", attempt+1, maxRetries+1, err)
+			if attempt < maxRetries {
+				continue // 继续重试
+			}
+			logger.Errorf("[Gate.io API] 读取响应失败，已重试 %d 次: %v", maxRetries+1, err)
+			return nil, fmt.Errorf("读取响应失败（已重试%d次）: %w", maxRetries, err)
+		}
+
+		logger.Infof("[Gate.io API] 响应状态码: %d, 响应长度: %d 字节", resp.StatusCode, len(bodyBytes))
+		if len(bodyBytes) > 0 && len(bodyBytes) < 1000 {
+			logger.Infof("[Gate.io API] 响应内容: %s", string(bodyBytes))
+		}
+
+		// 检查HTTP状态码
+		if resp.StatusCode == http.StatusOK {
+			// 成功，跳出重试循环
+			if attempt > 0 {
+				logger.Infof("[Gate.io API] ✓ 重试成功（第 %d 次尝试）", attempt+1)
+			}
+			break
+		}
+
+		// HTTP错误状态码处理
+		if resp.StatusCode >= 500 {
+			// 5xx 服务器错误，可以重试
+			logger.Warnf("[Gate.io API] 服务器错误 %d (尝试 %d/%d): %s", resp.StatusCode, attempt+1, maxRetries+1, string(bodyBytes))
+			if attempt < maxRetries {
+				continue // 继续重试
+			}
+			logger.Errorf("[Gate.io API] 服务器错误，已重试 %d 次: %s", maxRetries+1, string(bodyBytes))
+			return nil, fmt.Errorf("API返回错误: %s, 响应: %s", resp.Status, string(bodyBytes))
+		} else if resp.StatusCode == 429 {
+			// 429 Too Many Requests，可以重试
+			logger.Warnf("[Gate.io API] 请求频率限制 (尝试 %d/%d): %s", attempt+1, maxRetries+1, string(bodyBytes))
+			if attempt < maxRetries {
+				// 对于429错误，等待更长时间
+				waitTime := time.Duration(2<<uint(attempt)) * time.Second
+				logger.Infof("[Gate.io API] 频率限制，等待 %v 后重试...", waitTime)
+				time.Sleep(waitTime)
+				continue // 继续重试
+			}
+			logger.Errorf("[Gate.io API] 请求频率限制，已重试 %d 次: %s", maxRetries+1, string(bodyBytes))
+			return nil, fmt.Errorf("API返回错误: %s, 响应: %s", resp.Status, string(bodyBytes))
+		} else {
+			// 4xx 客户端错误（除了429），通常不需要重试
+			logger.Errorf("[Gate.io API] 客户端错误 %d: %s", resp.StatusCode, string(bodyBytes))
+			return nil, fmt.Errorf("API返回错误: %s, 响应: %s", resp.Status, string(bodyBytes))
+		}
 	}
 
 	// Gate.io返回格式: [["timestamp", "volume", "close", "high", "low", "open", "base_volume"], ...]
 	var klinesRaw [][]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&klinesRaw); err != nil {
+	if err := json.Unmarshal(bodyBytes, &klinesRaw); err != nil {
+		logger.Errorf("[Gate.io API] JSON解析失败: %v, 原始响应: %s", err, string(bodyBytes))
 		return nil, fmt.Errorf("解析响应失败: %w", err)
 	}
 
+	logger.Infof("[Gate.io API] 解析成功，原始数据条数: %d", len(klinesRaw))
+	if len(klinesRaw) > 0 {
+		logger.Infof("[Gate.io API] 第一条原始数据: %+v", klinesRaw[0])
+	}
+
 	var klines []database.KLine1m
-	for _, k := range klinesRaw {
+	parseErrors := 0
+	for i, k := range klinesRaw {
 		if len(k) < 7 {
+			logger.Warnf("[Gate.io API] 数据项 #%d 长度不足: %d (需要7)", i, len(k))
+			parseErrors++
 			continue
 		}
 
@@ -131,7 +235,21 @@ func (api *ExchangeAPI) fetchGateIOKLines(symbol, interval string, startTime, en
 			if timestamp < 1e12 {
 				timestamp = timestamp * 1000
 			}
+		case string:
+			// 尝试解析字符串时间戳
+			if ts, err := strconv.ParseInt(v, 10, 64); err == nil {
+				timestamp = ts
+				if timestamp < 1e12 {
+					timestamp = timestamp * 1000
+				}
+			} else {
+				logger.Warnf("[Gate.io API] 无法解析时间戳: %v (类型: %T)", k[0], k[0])
+				parseErrors++
+				continue
+			}
 		default:
+			logger.Warnf("[Gate.io API] 未知的时间戳类型: %v (类型: %T)", k[0], k[0])
+			parseErrors++
 			continue
 		}
 
@@ -154,8 +272,20 @@ func (api *ExchangeAPI) fetchGateIOKLines(symbol, interval string, startTime, en
 			Volume:    volume,
 			CloseTime: closeTime,
 		})
+
+		// 只打印第一条解析后的数据
+		if i == 0 {
+			timestampStr := time.Unix(timestamp/1000, 0).Format("2006-01-02 15:04:05")
+			logger.Infof("[Gate.io API] 第一条解析后的数据: timestamp=%s (%d), open=%.8f, high=%.8f, low=%.8f, close=%.8f, volume=%.8f",
+				timestampStr, timestamp, open, high, low, close, volume)
+		}
 	}
 
+	if parseErrors > 0 {
+		logger.Warnf("[Gate.io API] 解析过程中有 %d 条数据解析失败", parseErrors)
+	}
+
+	logger.Infof("[Gate.io API] 最终解析成功 %d 条K线数据", len(klines))
 	return klines, nil
 }
 
@@ -177,15 +307,77 @@ func (api *ExchangeAPI) fetchBinanceKLines(symbol, interval string, startTime, e
 		Timeout: 30 * time.Second,
 	}
 
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
-	}
-	defer resp.Body.Close()
+	// 重试机制：最多重试3次
+	maxRetries := 3
+	var resp *http.Response
+	var body []byte
+	var err error
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API返回错误: %s, 响应: %s", resp.Status, string(body))
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// 重试前等待，使用指数退避：1s, 2s, 4s
+			waitTime := time.Duration(1<<uint(attempt-1)) * time.Second
+			logger.Warnf("[Binance API] 第 %d 次重试，等待 %v 后重试...", attempt, waitTime)
+			time.Sleep(waitTime)
+		}
+
+		resp, err = client.Get(url)
+		if err != nil {
+			// 网络错误，可以重试
+			logger.Warnf("[Binance API] 请求失败 (尝试 %d/%d): %v", attempt+1, maxRetries+1, err)
+			if attempt < maxRetries {
+				continue // 继续重试
+			}
+			logger.Errorf("[Binance API] 请求失败，已重试 %d 次: %v", maxRetries+1, err)
+			return nil, fmt.Errorf("请求失败（已重试%d次）: %w", maxRetries, err)
+		}
+
+		body, err = io.ReadAll(resp.Body)
+		resp.Body.Close() // 立即关闭，避免资源泄漏
+
+		if err != nil {
+			logger.Warnf("[Binance API] 读取响应失败 (尝试 %d/%d): %v", attempt+1, maxRetries+1, err)
+			if attempt < maxRetries {
+				continue // 继续重试
+			}
+			logger.Errorf("[Binance API] 读取响应失败，已重试 %d 次: %v", maxRetries+1, err)
+			return nil, fmt.Errorf("读取响应失败（已重试%d次）: %w", maxRetries, err)
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			// 成功，跳出重试循环
+			if attempt > 0 {
+				logger.Infof("[Binance API] ✓ 重试成功（第 %d 次尝试）", attempt+1)
+			}
+			break
+		}
+
+		// HTTP错误状态码处理
+		if resp.StatusCode >= 500 {
+			// 5xx 服务器错误，可以重试
+			logger.Warnf("[Binance API] 服务器错误 %d (尝试 %d/%d): %s", resp.StatusCode, attempt+1, maxRetries+1, string(body))
+			if attempt < maxRetries {
+				continue // 继续重试
+			}
+			logger.Errorf("[Binance API] 服务器错误，已重试 %d 次: %s", maxRetries+1, string(body))
+			return nil, fmt.Errorf("API返回错误: %s, 响应: %s", resp.Status, string(body))
+		} else if resp.StatusCode == 429 {
+			// 429 Too Many Requests，可以重试
+			logger.Warnf("[Binance API] 请求频率限制 (尝试 %d/%d): %s", attempt+1, maxRetries+1, string(body))
+			if attempt < maxRetries {
+				// 对于429错误，等待更长时间
+				waitTime := time.Duration(2<<uint(attempt)) * time.Second
+				logger.Infof("[Binance API] 频率限制，等待 %v 后重试...", waitTime)
+				time.Sleep(waitTime)
+				continue // 继续重试
+			}
+			logger.Errorf("[Binance API] 请求频率限制，已重试 %d 次: %s", maxRetries+1, string(body))
+			return nil, fmt.Errorf("API返回错误: %s, 响应: %s", resp.Status, string(body))
+		} else {
+			// 4xx 客户端错误（除了429），通常不需要重试
+			logger.Errorf("[Binance API] 客户端错误 %d: %s", resp.StatusCode, string(body))
+			return nil, fmt.Errorf("API返回错误: %s, 响应: %s", resp.Status, string(body))
+		}
 	}
 
 	var klinesRaw [][]interface{}
@@ -239,58 +431,182 @@ func SyncSymbol(symbol string) error {
 func SyncSymbolWithPriority(symbol string, priorityRecent bool) error {
 	api := NewExchangeAPI()
 
-	// 1. 获取本地最新K线时间
-	lastTime, err := database.GetLatestKLineTime(symbol)
-	if err != nil {
-		return fmt.Errorf("获取最新K线时间失败: %w", err)
-	}
-
-	// 2. 计算需要拉取的时间范围
+	// 1. 计算目标时间范围
 	now := time.Now().UnixMilli()
-	var startTime int64
+	var targetStart, targetEnd int64
 
 	if priorityRecent {
-		// 优先模式：优先获取昨日至今的数据
-		if lastTime == 0 {
-			// 如果没有数据，从昨日开始拉取
-			yesterday := now - 24*60*60*1000
-			startTime = yesterday
-		} else {
-			// 从最后一条的下一条开始
-			startTime = lastTime + 1
-		}
+		// 优先模式：同步最近7天的数据
+		targetStart = now - 7*24*60*60*1000 // 7天前
+		targetEnd = now
 	} else {
-		// 历史模式：从指定时间开始拉取
-		if lastTime == 0 {
-			// 如果没有数据，从2020年开始
-			start2020 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
-			startTime = start2020
-		} else {
-			// 继续从上次停止的地方开始
-			startTime = lastTime + 1
+		// 历史模式：从2020年开始到当前
+		targetStart = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+		targetEnd = now
+	}
+
+	// 2. 查找缺失的时间段
+	missingRanges, err := database.FindMissingRanges(symbol, targetStart, targetEnd)
+	if err != nil {
+		return fmt.Errorf("查找缺失时间段失败: %w", err)
+	}
+
+	// 显示同步开始信息
+	var mode string
+	if priorityRecent {
+		mode = "近期数据"
+	} else {
+		mode = "历史数据"
+	}
+	targetStartStr := time.Unix(targetStart/1000, 0).Format("2006-01-02 15:04:05")
+	targetEndStr := time.Unix(targetEnd/1000, 0).Format("2006-01-02 15:04:05")
+	logger.Infof("开始同步 %s [%s] 目标范围: %s ~ %s", symbol, mode, targetStartStr, targetEndStr)
+
+	// 如果没有缺失的时间段，说明已经全部同步完成
+	if len(missingRanges) == 0 {
+		logger.Infof("[%s] ✓ 所有时间段已同步，无需同步", symbol)
+		return nil
+	}
+
+	logger.Infof("[%s] 发现 %d 个缺失的时间段需要同步", symbol, len(missingRanges))
+	for i, r := range missingRanges {
+		rangeStartStr := time.Unix(r.StartTime/1000, 0).Format("2006-01-02 15:04:05")
+		rangeEndStr := time.Unix(r.EndTime/1000, 0).Format("2006-01-02 15:04:05")
+		logger.Infof("[%s] 缺失时间段 #%d: %s ~ %s", symbol, i+1, rangeStartStr, rangeEndStr)
+	}
+
+	// 3. 对每个缺失的时间段进行同步
+	totalFetched := 0
+	batchSize := 300 // 每次只拉取300条
+
+	for rangeIdx, missingRange := range missingRanges {
+		logger.Infof("[%s] 开始同步缺失时间段 #%d/%d: %s ~ %s", symbol, rangeIdx+1, len(missingRanges),
+			time.Unix(missingRange.StartTime/1000, 0).Format("2006-01-02 15:04:05"),
+			time.Unix(missingRange.EndTime/1000, 0).Format("2006-01-02 15:04:05"))
+
+		// 在当前缺失时间段内分批拉取
+		currentStart := missingRange.StartTime
+		batchCount := 0
+		rangeFetched := 0
+
+		for currentStart <= missingRange.EndTime {
+			// 检查是否超过 Gate.io 的限制（最多10000个数据点之前）
+			maxPointsAgo := int64(10000 * 60 * 1000) // 10000分钟的毫秒数
+			minAllowedTime := now - maxPointsAgo
+
+			// 如果起始时间太早，调整到允许的最早时间
+			if currentStart < minAllowedTime {
+				currentStart = minAllowedTime
+			}
+
+			// 如果已经超过限制，停止同步历史数据
+			if currentStart >= now || currentStart > missingRange.EndTime {
+				break
+			}
+
+			// 显示当前批次信息
+			batchCount++
+			currentStartStr := time.Unix(currentStart/1000, 0).Format("2006-01-02 15:04:05")
+			logger.Infof("[%s] 批次 #%d: 从 %s 开始拉取 (最多 %d 条)", symbol, batchCount, currentStartStr, batchSize)
+
+			// 从交易所拉取数据（每次300条，不设置endTime，让API返回到当前时间）
+			logger.Infof("[%s] 正在请求API: startTime=%d (from=%s), limit=%d", symbol, currentStart, currentStartStr, batchSize)
+			klines, err := api.FetchKLines(symbol, "1m", currentStart, 0, batchSize)
+			if err != nil {
+				logger.Errorf("[%s] ❌ API请求失败: %v", symbol, err)
+				// 如果是时间太早的错误，说明已经无法获取更早的数据
+				if strings.Contains(err.Error(), "too long ago") || strings.Contains(err.Error(), "10000 points") {
+					logger.Warnf("[%s] 无法获取更早的数据（超过10000个数据点限制），停止同步", symbol)
+					// 只能获取最近的数据，停止同步更早的历史数据
+					break
+				}
+				// 如果是时间范围错误，尝试不设置startTime，只拉取最近的数据
+				if strings.Contains(err.Error(), "range too broad") || strings.Contains(err.Error(), "INVALID_PARAM_VALUE") {
+					logger.Infof("[%s] 时间范围错误，尝试拉取最近的数据（不设置startTime）", symbol)
+					// 不设置startTime，只拉取最近的数据
+					klines, err = api.FetchKLines(symbol, "1m", 0, 0, batchSize)
+					if err != nil {
+						logger.Errorf("[%s] ❌ 重试拉取最近数据也失败: %v", symbol, err)
+						return fmt.Errorf("拉取K线数据失败: %w", err)
+					}
+					logger.Infof("[%s] ✓ 重试成功，拉取到最近的数据", symbol)
+				} else {
+					logger.Errorf("[%s] ❌ 拉取K线数据失败（未知错误）: %v", symbol, err)
+					return fmt.Errorf("拉取K线数据失败: %w", err)
+				}
+			}
+
+			if len(klines) == 0 {
+				// 没有新数据，可能已经同步到最新
+				logger.Infof("[%s] ⚠️ API返回空数据，可能已经同步到最新或没有数据", symbol)
+				break
+			}
+
+			// 显示拉取成功信息
+			firstTime := time.Unix(klines[0].OpenTime/1000, 0).Format("2006-01-02 15:04:05")
+			lastTimeStr := time.Unix(klines[len(klines)-1].OpenTime/1000, 0).Format("2006-01-02 15:04:05")
+			logger.Infof("[%s] ✓ 成功拉取 %d 条数据 (时间范围: %s ~ %s)", symbol, len(klines), firstTime, lastTimeStr)
+
+			// 打印第一条完整数据（拉取阶段）
+			if len(klines) > 0 {
+				firstKline := klines[0]
+				firstOpenTimeStr := time.Unix(firstKline.OpenTime/1000, 0).Format("2006-01-02 15:04:05")
+				firstCloseTimeStr := time.Unix(firstKline.CloseTime/1000, 0).Format("2006-01-02 15:04:05")
+				logger.Infof("[%s] 第一条数据详情: open_time=%s, close_time=%s, open=%.8f, high=%.8f, low=%.8f, close=%.8f, volume=%.8f",
+					symbol, firstOpenTimeStr, firstCloseTimeStr, firstKline.Open, firstKline.High, firstKline.Low, firstKline.Close, firstKline.Volume)
+			}
+
+			// 保存到数据库
+			logger.Infof("[%s] 开始保存 %d 条数据到数据库...", symbol, len(klines))
+			if err := database.SaveKLine1m(klines); err != nil {
+				logger.Errorf("[%s] ❌ 保存K线数据失败: %v", symbol, err)
+				return fmt.Errorf("保存K线数据失败: %w", err)
+			}
+			logger.Infof("[%s] ✓ 数据保存完成", symbol)
+
+			// 更新统计
+			totalFetched += len(klines)
+			rangeFetched += len(klines)
+
+			// 更新同步状态
+			lastKlineTime := klines[len(klines)-1].CloseTime
+			if err := database.UpdateSyncStatus(symbol, time.Now().UnixMilli(), lastKlineTime); err != nil {
+				return fmt.Errorf("更新同步状态失败: %w", err)
+			}
+
+			// 如果返回的数据少于batchSize，说明已经拉完这个时间段
+			if len(klines) < batchSize {
+				break
+			}
+
+			// 下一批从最后一条的下一条开始
+			currentStart = lastKlineTime + 1
+
+			// 避免请求过快，稍作延迟
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		// 记录已同步的时间段
+		if rangeFetched > 0 {
+			// 计算实际同步的时间范围（从第一批的第一条到最后一批的最后一条）
+			// 这里简化处理，使用缺失时间段的边界
+			actualEnd := currentStart - 1
+			if actualEnd < missingRange.StartTime {
+				actualEnd = missingRange.EndTime
+			}
+			if err := database.AddSyncTimeRange(symbol, missingRange.StartTime, actualEnd); err != nil {
+				logger.Warnf("[%s] 记录同步时间段失败: %v", symbol, err)
+			} else {
+				logger.Infof("[%s] ✓ 时间段 #%d 同步完成，获取 %d 条数据，已记录时间段", symbol, rangeIdx+1, rangeFetched)
+			}
 		}
 	}
 
-	// 3. 从交易所拉取1分钟数据
-	batchSize := 1000
-	klines, err := api.FetchKLines(symbol, "1m", startTime, now, batchSize)
-	if err != nil {
-		return fmt.Errorf("拉取K线数据失败: %w", err)
-	}
-
-	if len(klines) == 0 {
-		return nil // 没有新数据
-	}
-
-	// 4. 保存到数据库
-	if err := database.SaveKLine1m(klines); err != nil {
-		return fmt.Errorf("保存K线数据失败: %w", err)
-	}
-
-	// 5. 更新同步状态
-	lastKlineTime := klines[len(klines)-1].CloseTime
-	if err := database.UpdateSyncStatus(symbol, now, lastKlineTime); err != nil {
-		return fmt.Errorf("更新同步状态失败: %w", err)
+	// 显示同步完成信息
+	if totalFetched > 0 {
+		logger.Infof("[%s] ✓ 同步完成，共获取 %d 条数据", symbol, totalFetched)
+	} else {
+		logger.Debugf("[%s] 同步完成，无新数据", symbol)
 	}
 
 	return nil
@@ -304,17 +620,54 @@ func SyncSymbolInitial(symbol string, days int) error {
 	now := time.Now().UnixMilli()
 	startTime := now - int64(days*24*60*60*1000) // days天前
 
-	// Gate.io限制每次最多1000根，需要分批拉取
-	batchSize := 1000
+	// 分批拉取（每次只拉取少量数据，逐步推进）
+	// Gate.io限制：最多只能获取最近 10000 个数据点（约6.9天）
+	// 策略：每次只拉取 300 条，逐步推进
+	batchSize := 300 // 每次只拉取300条
 	currentStart := startTime
 
 	for {
-		klines, err := api.FetchKLines(symbol, "1m", currentStart, now, batchSize)
+		// 如果已经到达当前时间，停止
+		if currentStart >= now {
+			break
+		}
+
+		// 检查是否超过 Gate.io 的限制（最多10000个数据点之前）
+		maxPointsAgo := int64(10000 * 60 * 1000) // 10000分钟的毫秒数
+		minAllowedTime := now - maxPointsAgo
+
+		// 如果起始时间太早，调整到允许的最早时间
+		if currentStart < minAllowedTime {
+			currentStart = minAllowedTime
+		}
+
+		// 如果已经超过限制，停止同步历史数据
+		if currentStart >= now {
+			break
+		}
+
+		// 从交易所拉取数据（每次300条，不设置endTime，让API返回到当前时间）
+		klines, err := api.FetchKLines(symbol, "1m", currentStart, 0, batchSize)
 		if err != nil {
-			return fmt.Errorf("拉取K线数据失败: %w", err)
+			// 如果是时间太早的错误，说明已经无法获取更早的数据
+			if strings.Contains(err.Error(), "too long ago") || strings.Contains(err.Error(), "10000 points") {
+				// 只能获取最近的数据，停止同步更早的历史数据
+				break
+			}
+			// 如果是时间范围错误，尝试不设置startTime，只拉取最近的数据
+			if strings.Contains(err.Error(), "range too broad") || strings.Contains(err.Error(), "INVALID_PARAM_VALUE") {
+				// 不设置startTime，只拉取最近的数据
+				klines, err = api.FetchKLines(symbol, "1m", 0, 0, batchSize)
+				if err != nil {
+					return fmt.Errorf("拉取K线数据失败: %w", err)
+				}
+			} else {
+				return fmt.Errorf("拉取K线数据失败: %w", err)
+			}
 		}
 
 		if len(klines) == 0 {
+			// 没有新数据，可能已经同步到最新
 			break
 		}
 
@@ -329,8 +682,13 @@ func SyncSymbolInitial(symbol string, days int) error {
 			return fmt.Errorf("更新同步状态失败: %w", err)
 		}
 
-		// 如果返回的数据少于batchSize，说明已经拉完
+		// 如果返回的数据少于batchSize，说明已经拉完这个时间段
 		if len(klines) < batchSize {
+			// 检查是否还有更多数据需要拉取
+			if lastKlineTime < now {
+				currentStart = lastKlineTime + 1
+				continue
+			}
 			break
 		}
 
@@ -368,9 +726,17 @@ func SyncSymbolHistorical(symbol string, startYear int) error {
 		return nil
 	}
 
-	// 分批拉取
-	batchSize := 1000
+	// 显示同步开始信息
+	startTimeStr := time.Unix(startTime/1000, 0).Format("2006-01-02 15:04:05")
+	logger.Infof("开始同步 %s [历史数据] 从 %s 开始 (年份: %d)", symbol, startTimeStr, startYear)
+
+	// 分批拉取（每次只拉取少量数据，逐步推进）
+	// Gate.io限制：最多只能获取最近 10000 个数据点（约6.9天）
+	// 策略：每次只拉取 300 条，逐步推进
+	batchSize := 300 // 每次只拉取300条
 	currentStart := startTime
+	totalFetched := 0
+	batchCount := 0
 
 	for {
 		// 如果已经到达当前时间，停止
@@ -378,19 +744,82 @@ func SyncSymbolHistorical(symbol string, startYear int) error {
 			break
 		}
 
-		klines, err := api.FetchKLines(symbol, "1m", currentStart, now, batchSize)
-		if err != nil {
-			return fmt.Errorf("拉取K线数据失败: %w", err)
+		// 检查是否超过 Gate.io 的限制（最多10000个数据点之前）
+		maxPointsAgo := int64(10000 * 60 * 1000) // 10000分钟的毫秒数
+		minAllowedTime := now - maxPointsAgo
+
+		// 如果起始时间太早，调整到允许的最早时间
+		if currentStart < minAllowedTime {
+			currentStart = minAllowedTime
 		}
 
-		if len(klines) == 0 {
+		// 如果已经超过限制，停止同步历史数据
+		if currentStart >= now {
 			break
 		}
 
+		// 显示当前批次信息
+		batchCount++
+		currentStartStr := time.Unix(currentStart/1000, 0).Format("2006-01-02 15:04:05")
+		logger.Infof("[%s] 批次 #%d: 从 %s 开始拉取 (最多 %d 条)", symbol, batchCount, currentStartStr, batchSize)
+
+		// 从交易所拉取数据（每次300条，不设置endTime，让API返回到当前时间）
+		logger.Infof("[%s] 正在请求API: startTime=%d (from=%s), limit=%d", symbol, currentStart, currentStartStr, batchSize)
+		klines, err := api.FetchKLines(symbol, "1m", currentStart, 0, batchSize)
+		if err != nil {
+			logger.Errorf("[%s] ❌ API请求失败: %v", symbol, err)
+			// 如果是时间太早的错误，说明已经无法获取更早的数据
+			if strings.Contains(err.Error(), "too long ago") || strings.Contains(err.Error(), "10000 points") {
+				logger.Warnf("[%s] 无法获取更早的数据（超过10000个数据点限制），停止同步", symbol)
+				// 只能获取最近的数据，停止同步更早的历史数据
+				break
+			}
+			// 如果是时间范围错误，尝试不设置startTime，只拉取最近的数据
+			if strings.Contains(err.Error(), "range too broad") || strings.Contains(err.Error(), "INVALID_PARAM_VALUE") {
+				logger.Infof("[%s] 时间范围错误，尝试拉取最近的数据（不设置startTime）", symbol)
+				// 不设置startTime，只拉取最近的数据
+				klines, err = api.FetchKLines(symbol, "1m", 0, 0, batchSize)
+				if err != nil {
+					logger.Errorf("[%s] ❌ 重试拉取最近数据也失败: %v", symbol, err)
+					return fmt.Errorf("拉取K线数据失败: %w", err)
+				}
+				logger.Infof("[%s] ✓ 重试成功，拉取到最近的数据", symbol)
+			} else {
+				logger.Errorf("[%s] ❌ 拉取K线数据失败（未知错误）: %v", symbol, err)
+				return fmt.Errorf("拉取K线数据失败: %w", err)
+			}
+		}
+
+		if len(klines) == 0 {
+			// 没有新数据，可能已经同步到最新
+			logger.Infof("[%s] ⚠️ API返回空数据，可能已经同步到最新或没有数据", symbol)
+			break
+		}
+
+		// 显示拉取成功信息
+		firstTime := time.Unix(klines[0].OpenTime/1000, 0).Format("2006-01-02 15:04:05")
+		lastTimeStr := time.Unix(klines[len(klines)-1].OpenTime/1000, 0).Format("2006-01-02 15:04:05")
+		logger.Infof("[%s] ✓ 成功拉取 %d 条数据 (时间范围: %s ~ %s)", symbol, len(klines), firstTime, lastTimeStr)
+
+		// 打印第一条完整数据（拉取阶段）
+		if len(klines) > 0 {
+			firstKline := klines[0]
+			firstOpenTimeStr := time.Unix(firstKline.OpenTime/1000, 0).Format("2006-01-02 15:04:05")
+			firstCloseTimeStr := time.Unix(firstKline.CloseTime/1000, 0).Format("2006-01-02 15:04:05")
+			logger.Infof("[%s] 第一条数据详情: open_time=%s, close_time=%s, open=%.8f, high=%.8f, low=%.8f, close=%.8f, volume=%.8f",
+				symbol, firstOpenTimeStr, firstCloseTimeStr, firstKline.Open, firstKline.High, firstKline.Low, firstKline.Close, firstKline.Volume)
+		}
+
 		// 保存到数据库
+		logger.Infof("[%s] 开始保存 %d 条数据到数据库...", symbol, len(klines))
 		if err := database.SaveKLine1m(klines); err != nil {
+			logger.Errorf("[%s] ❌ 保存K线数据失败: %v", symbol, err)
 			return fmt.Errorf("保存K线数据失败: %w", err)
 		}
+		logger.Infof("[%s] ✓ 数据保存完成", symbol)
+
+		// 更新统计
+		totalFetched += len(klines)
 
 		// 更新进度
 		lastKlineTime := klines[len(klines)-1].CloseTime
@@ -398,8 +827,13 @@ func SyncSymbolHistorical(symbol string, startYear int) error {
 			return fmt.Errorf("更新同步状态失败: %w", err)
 		}
 
-		// 如果返回的数据少于batchSize，说明已经拉完
+		// 如果返回的数据少于batchSize，说明已经拉完这个时间段
 		if len(klines) < batchSize {
+			// 检查是否还有更多数据需要拉取
+			if lastKlineTime < now {
+				currentStart = lastKlineTime + 1
+				continue
+			}
 			break
 		}
 
@@ -408,6 +842,13 @@ func SyncSymbolHistorical(symbol string, startYear int) error {
 
 		// 避免请求过快，稍作延迟
 		time.Sleep(200 * time.Millisecond)
+	}
+
+	// 显示同步完成信息
+	if totalFetched > 0 {
+		logger.Infof("[%s] ✓ 历史数据同步完成，共获取 %d 条数据", symbol, totalFetched)
+	} else {
+		logger.Debugf("[%s] 历史数据同步完成，无新数据", symbol)
 	}
 
 	return nil

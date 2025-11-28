@@ -1,0 +1,134 @@
+{
+  "hot_symbols": [
+    {
+      "symbol": "BTC_USDT",
+      "priority": 1,
+      "enabled": true,
+      "description": "比特币"
+    },
+    {
+      "symbol": "ETH_USDT",
+      "priority": 2,
+      "enabled": true,
+      "description": "以太坊"
+    },
+    {
+      "symbol": "SOL_USDT",
+      "priority": 3,
+      "enabled": true,
+      "description": "Solana"
+    },
+    {
+      "symbol": "BNB_USDT",
+      "priority": 4,
+      "enabled": true,
+      "description": "币安币"
+    },
+    {
+      "symbol": "XRP_USDT",
+      "priority": 5,
+      "enabled": true,
+      "description": "瑞波币"
+    },
+    {
+      "symbol": "ADA_USDT",
+      "priority": 6,
+      "enabled": true,
+      "description": "Cardano"
+    },
+    {
+      "symbol": "DOGE_USDT",
+      "priority": 7,
+      "enabled": true,
+      "description": "狗狗币"
+    },
+    {
+      "symbol": "DOT_USDT",
+      "priority": 8,
+      "enabled": true,
+      "description": "Polkadot"
+    },
+    {
+      "symbol": "AVAX_USDT",
+      "priority": 9,
+      "enabled": true,
+      "description": "Avalanche"
+    },
+    {
+      "symbol": "MATIC_USDT",
+      "priority": 10,
+      "enabled": false,
+      "description": "Polygon (Gate.io可能不支持此交易对，已禁用)"
+    }
+  ],
+  "minor_symbols": [
+    {
+      "symbol": "LINK_USDT",
+      "priority": 11,
+      "enabled": true,
+      "description": "Chainlink"
+    },
+    {
+      "symbol": "UNI_USDT",
+      "priority": 12,
+      "enabled": true,
+      "description": "Uniswap"
+    },
+    {
+      "symbol": "ATOM_USDT",
+      "priority": 13,
+      "enabled": true,
+      "description": "Cosmos"
+    },
+    {
+      "symbol": "ETC_USDT",
+      "priority": 14,
+      "enabled": true,
+      "description": "以太经典"
+    },
+    {
+      "symbol": "LTC_USDT",
+      "priority": 15,
+      "enabled": true,
+      "description": "莱特币"
+    },
+    {
+      "symbol": "BCH_USDT",
+      "priority": 16,
+      "enabled": true,
+      "description": "比特币现金"
+    },
+    {
+      "symbol": "XLM_USDT",
+      "priority": 17,
+      "enabled": true,
+      "description": "Stellar"
+    },
+    {
+      "symbol": "ALGO_USDT",
+      "priority": 18,
+      "enabled": true,
+      "description": "Algorand"
+    },
+    {
+      "symbol": "VET_USDT",
+      "priority": 19,
+      "enabled": true,
+      "description": "VeChain"
+    },
+    {
+      "symbol": "FIL_USDT",
+      "priority": 20,
+      "enabled": true,
+      "description": "Filecoin"
+    }
+  ],
+  "sync_config": {
+    "priority_recent_days": 1,
+    "historical_start_year": 2020,
+    "batch_size": 1000,
+    "request_interval_ms": 200,
+    "idle_sync_enabled": true,
+    "idle_check_interval_seconds": 60
+  }
+}

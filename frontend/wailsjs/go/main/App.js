@@ -50,6 +50,10 @@ export function StartMarketDataStream(arg1, arg2) {
   return window['go']['main']['App']['StartMarketDataStream'](arg1, arg2);
 }
 
+export function StartPrioritySync() {
+  return window['go']['main']['App']['StartPrioritySync']();
+}
+
 export function StopAutoSync(arg1) {
   return window['go']['main']['App']['StopAutoSync'](arg1);
 }
