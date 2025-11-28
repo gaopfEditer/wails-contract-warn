@@ -17,19 +17,27 @@ export function GetNetworkLogs(arg1:number):Promise<string>;
 
 export function InitDatabase(arg1:string):Promise<string>;
 
+export function IsRealtimeSyncRunning():Promise<boolean>;
+
 export function LoadTestData(arg1:string):Promise<string>;
 
 export function ProxyAPI(arg1:string,arg2:string):Promise<string>;
 
 export function StartAutoSync(arg1:string,arg2:number):Promise<string>;
 
+export function StartHistoricalSyncService():Promise<void>;
+
 export function StartMarketDataStream(arg1:string,arg2:string):Promise<void>;
 
 export function StartPrioritySync():Promise<string>;
 
+export function StartRealtimeSyncService():Promise<string>;
+
 export function StopAutoSync(arg1:string):Promise<string>;
 
 export function StopMarketDataStream(arg1:string):Promise<void>;
+
+export function StopRealtimeSyncService():Promise<string>;
 
 export function SyncKlineData(arg1:string):Promise<string>;
 

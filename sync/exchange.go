@@ -100,7 +100,10 @@ func (api *ExchangeAPI) fetchGateIOKLines(symbol, interval string, startTime, en
 		params["limit"] = "300"
 	}
 
-	// 不设置 to 参数，让 API 返回到当前时间的数据
+	// 设置 to 参数（如果提供了 endTime）
+	if endTime > 0 {
+		params["to"] = strconv.FormatInt(endTime/1000, 10) // Gate.io使用秒级时间戳
+	}
 
 	// 构建URL
 	url += "?"
@@ -436,12 +439,12 @@ func SyncSymbolWithPriority(symbol string, priorityRecent bool) error {
 	var targetStart, targetEnd int64
 
 	if priorityRecent {
-		// 优先模式：同步最近7天的数据
-		targetStart = now - 7*24*60*60*1000 // 7天前
+		// 实时模式：同步最近2天的数据（用于实时数据同步）
+		targetStart = now - 2*24*60*60*1000 // 2天前
 		targetEnd = now
 	} else {
-		// 历史模式：从2020年开始到当前
-		targetStart = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+		// 历史模式：从2020年开始到当前（用于历史数据同步）
+		targetStart = time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
 		targetEnd = now
 	}
 
@@ -607,6 +610,203 @@ func SyncSymbolWithPriority(symbol string, priorityRecent bool) error {
 		logger.Infof("[%s] ✓ 同步完成，共获取 %d 条数据", symbol, totalFetched)
 	} else {
 		logger.Debugf("[%s] 同步完成，无新数据", symbol)
+	}
+
+	return nil
+}
+
+// SyncSymbolHistoricalBackward 历史数据同步（从近到远倒推，按天为单位，直到指定年份）
+// 从1小时前开始，以天为单位逐步向前（倒推）获取数据，直到startYear
+func SyncSymbolHistoricalBackward(symbol string, startYear int, batchSize int) error {
+	api := NewExchangeAPI()
+
+	// 计算目标时间范围
+	// 从1小时前开始，避免每次都获取到最新的一条数据而无法继续倒推
+	now := time.Now().UnixMilli()
+	oneHourAgo := now - int64(60*60*1000) // 1小时前
+	targetStart := time.Date(startYear, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	targetEnd := oneHourAgo // 从1小时前开始，而不是当前时间
+
+	// 查找缺失的时间段
+	missingRanges, err := database.FindMissingRanges(symbol, targetStart, targetEnd)
+	if err != nil {
+		return fmt.Errorf("查找缺失时间段失败: %w", err)
+	}
+
+	// 如果没有缺失的时间段，说明已经全部同步完成
+	if len(missingRanges) == 0 {
+		logger.Infof("[%s] ✓ 所有历史数据已同步，无需同步", symbol)
+		return nil
+	}
+
+	// 对缺失时间段按时间倒序排序（从近到远）
+	// 这样优先同步最新的缺失数据
+	for i, j := 0, len(missingRanges)-1; i < j; i, j = i+1, j-1 {
+		missingRanges[i], missingRanges[j] = missingRanges[j], missingRanges[i]
+	}
+
+	logger.Infof("开始同步 %s [历史数据-按天倒推] 目标范围: %s ~ %s (起始年份: %d, 从1小时前开始)",
+		symbol,
+		time.Unix(targetStart/1000, 0).Format("2006-01-02 15:04:05"),
+		time.Unix(targetEnd/1000, 0).Format("2006-01-02 15:04:05"),
+		startYear)
+	logger.Infof("[%s] 发现 %d 个缺失的时间段需要同步（从近到远，按天倒推）", symbol, len(missingRanges))
+
+	// 从近到远同步缺失的时间段
+	totalFetched := 0
+
+	for rangeIdx, missingRange := range missingRanges {
+		rangeStartStr := time.Unix(missingRange.StartTime/1000, 0).Format("2006-01-02 15:04:05")
+		rangeEndStr := time.Unix(missingRange.EndTime/1000, 0).Format("2006-01-02 15:04:05")
+		logger.Infof("[%s] 开始同步缺失时间段 #%d/%d: %s ~ %s (从近到远)", symbol, rangeIdx+1, len(missingRanges), rangeStartStr, rangeEndStr)
+
+		// 在当前缺失时间段内，按天为单位倒推拉取
+		// 策略：从 missingRange.EndTime 开始，每天向前倒推一天
+		currentDayEnd := missingRange.EndTime
+		dayCount := 0
+		rangeFetched := 0
+
+		for currentDayEnd >= missingRange.StartTime {
+			// 检查是否超过 Gate.io 的限制（最多10000个数据点之前）
+			// 注意：这里使用 oneHourAgo 而不是 now，因为我们从1小时前开始同步
+			maxPointsAgo := int64(10000 * 60 * 1000) // 10000分钟的毫秒数
+			minAllowedTime := oneHourAgo - maxPointsAgo
+
+			// 如果结束时间太早，调整到允许的最早时间
+			if currentDayEnd < minAllowedTime {
+				currentDayEnd = minAllowedTime
+			}
+
+			// 如果已经超过限制或到达起始时间，停止
+			if currentDayEnd < missingRange.StartTime {
+				break
+			}
+
+			// 计算当天的开始时间（当天00:00:00）
+			currentDay := time.Unix(currentDayEnd/1000, 0)
+			dayStart := time.Date(currentDay.Year(), currentDay.Month(), currentDay.Day(), 0, 0, 0, 0, time.UTC).UnixMilli()
+
+			// 确保不超过缺失时间段的起始时间
+			if dayStart < missingRange.StartTime {
+				dayStart = missingRange.StartTime
+			}
+
+			// 显示当前批次信息（按天）
+			dayCount++
+			dayStartStr := time.Unix(dayStart/1000, 0).Format("2006-01-02 15:04:05")
+			dayEndStr := time.Unix(currentDayEnd/1000, 0).Format("2006-01-02 15:04:05")
+			logger.Infof("[%s] 第 %d 天: 倒推拉取 %s ~ %s (最多 %d 条)", symbol, dayCount, dayStartStr, dayEndStr, batchSize)
+
+			// 从交易所拉取数据（从 dayStart 开始，到 currentDayEnd 结束）
+			logger.Infof("[%s] 正在请求API: startTime=%d (from=%s), endTime=%d (to=%s), limit=%d",
+				symbol, dayStart, dayStartStr, currentDayEnd, dayEndStr, batchSize)
+			klines, err := api.FetchKLines(symbol, "1m", dayStart, currentDayEnd, batchSize)
+			if err != nil {
+				logger.Errorf("[%s] ❌ API请求失败: %v", symbol, err)
+				// 如果是时间太早的错误，说明已经无法获取更早的数据
+				if strings.Contains(err.Error(), "too long ago") || strings.Contains(err.Error(), "10000 points") {
+					logger.Warnf("[%s] 无法获取更早的数据（超过10000个数据点限制），停止倒推", symbol)
+					break
+				}
+				// 如果是时间范围错误，尝试缩小范围
+				if strings.Contains(err.Error(), "range too broad") || strings.Contains(err.Error(), "INVALID_PARAM_VALUE") {
+					logger.Infof("[%s] 时间范围错误，缩小范围继续倒推", symbol)
+					// 缩小时间范围，只拉取最近的数据（缩小到半天）
+					smallerEnd := dayStart + int64(12*60*60*1000) // 12小时
+					if smallerEnd > currentDayEnd {
+						smallerEnd = currentDayEnd
+					}
+					klines, err = api.FetchKLines(symbol, "1m", dayStart, smallerEnd, batchSize)
+					if err != nil {
+						logger.Errorf("[%s] ❌ 重试拉取也失败: %v", symbol, err)
+						// 继续下一个时间段
+						break
+					}
+					logger.Infof("[%s] ✓ 重试成功，拉取到数据", symbol)
+				} else {
+					logger.Errorf("[%s] ❌ 拉取K线数据失败（未知错误）: %v", symbol, err)
+					// 继续下一个时间段
+					break
+				}
+			}
+
+			if len(klines) == 0 {
+				// 没有新数据，可能已经同步到最新
+				logger.Infof("[%s] ⚠️ API返回空数据，继续向前倒推（前一天）", symbol)
+				// 向前倒推一天
+				currentDayEnd = dayStart - 1
+				if currentDayEnd < missingRange.StartTime {
+					break
+				}
+				continue
+			}
+
+			// 显示拉取成功信息
+			firstTime := time.Unix(klines[0].OpenTime/1000, 0).Format("2006-01-02 15:04:05")
+			lastTimeStr := time.Unix(klines[len(klines)-1].OpenTime/1000, 0).Format("2006-01-02 15:04:05")
+			logger.Infof("[%s] ✓ 成功拉取 %d 条数据 (时间范围: %s ~ %s)", symbol, len(klines), firstTime, lastTimeStr)
+
+			// 打印第一条完整数据（拉取阶段）
+			if len(klines) > 0 {
+				firstKline := klines[0]
+				firstOpenTimeStr := time.Unix(firstKline.OpenTime/1000, 0).Format("2006-01-02 15:04:05")
+				firstCloseTimeStr := time.Unix(firstKline.CloseTime/1000, 0).Format("2006-01-02 15:04:05")
+				logger.Infof("[%s] 第一条数据详情: open_time=%s, close_time=%s, open=%.8f, high=%.8f, low=%.8f, close=%.8f, volume=%.8f",
+					symbol, firstOpenTimeStr, firstCloseTimeStr, firstKline.Open, firstKline.High, firstKline.Low, firstKline.Close, firstKline.Volume)
+			}
+
+			// 保存到数据库
+			logger.Infof("[%s] 开始保存 %d 条数据到数据库...", symbol, len(klines))
+			if err := database.SaveKLine1m(klines); err != nil {
+				logger.Errorf("[%s] ❌ 保存K线数据失败: %v", symbol, err)
+				return fmt.Errorf("保存K线数据失败: %w", err)
+			}
+			logger.Infof("[%s] ✓ 数据保存完成", symbol)
+
+			// 更新统计
+			totalFetched += len(klines)
+			rangeFetched += len(klines)
+
+			// 更新同步状态
+			lastKlineTime := klines[len(klines)-1].CloseTime
+			if err := database.UpdateSyncStatus(symbol, time.Now().UnixMilli(), lastKlineTime); err != nil {
+				return fmt.Errorf("更新同步状态失败: %w", err)
+			}
+
+			// 向前倒推：下一批从前一天开始（按天为单位）
+			// 计算前一天的结束时间（当前天的开始时间 - 1毫秒）
+			currentDayEnd = dayStart - 1
+
+			// 如果已经到达或超过起始时间，停止这个时间段
+			if currentDayEnd < missingRange.StartTime {
+				break
+			}
+
+			// 避免请求过快，稍作延迟
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		// 记录已同步的时间段
+		if rangeFetched > 0 {
+			// 计算实际同步的时间范围
+			actualStart := missingRange.StartTime
+			actualEnd := missingRange.EndTime
+			if currentDayEnd >= missingRange.StartTime {
+				actualStart = currentDayEnd + 1
+			}
+			if err := database.AddSyncTimeRange(symbol, actualStart, actualEnd); err != nil {
+				logger.Warnf("[%s] 记录同步时间段失败: %v", symbol, err)
+			} else {
+				logger.Infof("[%s] ✓ 时间段 #%d 同步完成，获取 %d 条数据，已记录时间段", symbol, rangeIdx+1, rangeFetched)
+			}
+		}
+	}
+
+	// 显示同步完成信息
+	if totalFetched > 0 {
+		logger.Infof("[%s] ✓ 历史数据倒推同步完成，共获取 %d 条数据", symbol, totalFetched)
+	} else {
+		logger.Debugf("[%s] 历史数据倒推同步完成，无新数据", symbol)
 	}
 
 	return nil

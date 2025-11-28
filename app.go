@@ -22,12 +22,14 @@ import (
 
 // App 结构体（控制器层）
 type App struct {
-	ctx                 context.Context
-	market              *service.MarketService
-	syncService         *service.SyncService
-	prioritySyncService *service.PrioritySyncService
-	proxyClient         *api.ProxyClient
-	dbInit              bool
+	ctx                   context.Context
+	market                *service.MarketService
+	syncService           *service.SyncService
+	prioritySyncService   *service.PrioritySyncService // 保留用于兼容
+	historicalSyncService *service.HistoricalSyncService
+	realtimeSyncService   *service.RealtimeSyncService
+	proxyClient           *api.ProxyClient
+	dbInit                bool
 }
 
 // NewApp 创建新的应用实例
@@ -58,9 +60,9 @@ func (a *App) startup(ctx context.Context) {
 			a.dbInit = true
 			logger.Info("数据库连接成功，表结构已创建")
 
-			// 自动启动优先级同步服务
-			if _, err := a.StartPrioritySync(); err != nil {
-				logger.Errorf("启动优先级同步服务失败: %v", err)
+			// 默认只启动历史数据同步服务
+			if err := a.StartHistoricalSyncService(); err != nil {
+				logger.Errorf("启动历史数据同步服务失败: %v", err)
 			}
 		}
 	} else {
@@ -90,6 +92,16 @@ func (a *App) shutdown(ctx context.Context) {
 	if a.prioritySyncService != nil {
 		a.prioritySyncService.Stop()
 		logger.Debug("优先级同步服务已停止")
+	}
+
+	if a.historicalSyncService != nil {
+		a.historicalSyncService.Stop()
+		logger.Debug("历史数据同步服务已停止")
+	}
+
+	if a.realtimeSyncService != nil {
+		a.realtimeSyncService.Stop()
+		logger.Debug("实时数据同步服务已停止")
 	}
 
 	if a.dbInit {
@@ -328,7 +340,78 @@ func (a *App) StartAutoSync(symbol string, intervalSeconds int) (string, error) 
 	return "优先级自动同步已启动（将优先同步热门币种的近期数据）", nil
 }
 
-// StartPrioritySync 启动优先级同步服务（从配置文件读取币种）
+// StartHistoricalSyncService 启动历史数据同步服务（默认启动）
+func (a *App) StartHistoricalSyncService() error {
+	if !a.dbInit {
+		return fmt.Errorf("数据库未初始化，无法启动历史数据同步服务")
+	}
+
+	syncConfig, err := config.GetSyncConfig()
+	if err != nil {
+		return fmt.Errorf("获取同步配置失败: %w", err)
+	}
+
+	// 如果服务已经在运行，先停止
+	if a.historicalSyncService != nil && a.historicalSyncService.IsRunning() {
+		a.historicalSyncService.Stop()
+	}
+
+	// 启动历史数据同步服务
+	// 从配置的起始年份开始，批量获取，每次300条，每个币种间隔5秒
+	historicalService := service.NewHistoricalSyncService(
+		syncConfig.RequestIntervalMs/1000, // 转换为秒
+		300,                               // 批次大小
+		syncConfig.HistoricalStartYear,    // 起始年份
+	)
+	historicalService.Start()
+	a.historicalSyncService = historicalService
+	logger.Infof("历史数据同步服务已启动（起始年份: %d, 批次大小: 300）", syncConfig.HistoricalStartYear)
+
+	return nil
+}
+
+// StartRealtimeSyncService 启动实时数据同步服务（用户手动触发）
+func (a *App) StartRealtimeSyncService() (string, error) {
+	if !a.dbInit {
+		return "", fmt.Errorf("数据库未初始化，无法启动实时数据同步服务")
+	}
+
+	// 如果服务已经在运行，直接返回
+	if a.realtimeSyncService != nil && a.realtimeSyncService.IsRunning() {
+		return "实时数据同步服务已在运行", nil
+	}
+
+	// 启动实时数据同步服务
+	// 每分钟获取一次最新数据
+	realtimeService := service.NewRealtimeSyncService(60) // 60秒 = 1分钟
+	realtimeService.Start()
+	a.realtimeSyncService = realtimeService
+	logger.Info("实时数据同步服务已启动（同步间隔: 1分钟）")
+
+	return "实时数据同步服务已启动（每分钟同步一次最新数据）", nil
+}
+
+// StopRealtimeSyncService 停止实时数据同步服务
+func (a *App) StopRealtimeSyncService() (string, error) {
+	if a.realtimeSyncService == nil || !a.realtimeSyncService.IsRunning() {
+		return "实时数据同步服务未运行", nil
+	}
+
+	a.realtimeSyncService.Stop()
+	logger.Info("实时数据同步服务已停止")
+
+	return "实时数据同步服务已停止", nil
+}
+
+// IsRealtimeSyncRunning 检查实时数据同步服务是否运行中
+func (a *App) IsRealtimeSyncRunning() bool {
+	if a.realtimeSyncService == nil {
+		return false
+	}
+	return a.realtimeSyncService.IsRunning()
+}
+
+// StartPrioritySync 启动优先级同步服务（从配置文件读取币种）（保留用于兼容）
 func (a *App) StartPrioritySync() (string, error) {
 	if !a.dbInit {
 		return "", fmt.Errorf("数据库未初始化")

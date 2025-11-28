@@ -34,6 +34,10 @@ export function InitDatabase(arg1) {
   return window['go']['main']['App']['InitDatabase'](arg1);
 }
 
+export function IsRealtimeSyncRunning() {
+  return window['go']['main']['App']['IsRealtimeSyncRunning']();
+}
+
 export function LoadTestData(arg1) {
   return window['go']['main']['App']['LoadTestData'](arg1);
 }
@@ -46,6 +50,10 @@ export function StartAutoSync(arg1, arg2) {
   return window['go']['main']['App']['StartAutoSync'](arg1, arg2);
 }
 
+export function StartHistoricalSyncService() {
+  return window['go']['main']['App']['StartHistoricalSyncService']();
+}
+
 export function StartMarketDataStream(arg1, arg2) {
   return window['go']['main']['App']['StartMarketDataStream'](arg1, arg2);
 }
@@ -54,12 +62,20 @@ export function StartPrioritySync() {
   return window['go']['main']['App']['StartPrioritySync']();
 }
 
+export function StartRealtimeSyncService() {
+  return window['go']['main']['App']['StartRealtimeSyncService']();
+}
+
 export function StopAutoSync(arg1) {
   return window['go']['main']['App']['StopAutoSync'](arg1);
 }
 
 export function StopMarketDataStream(arg1) {
   return window['go']['main']['App']['StopMarketDataStream'](arg1);
+}
+
+export function StopRealtimeSyncService() {
+  return window['go']['main']['App']['StopRealtimeSyncService']();
 }
 
 export function SyncKlineData(arg1) {
