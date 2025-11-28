@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"wails-contract-warn/logger"
 	datasync "wails-contract-warn/sync"
 )
 
@@ -30,11 +31,13 @@ func (s *SyncService) Start() {
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
+		logger.Warn("同步服务已在运行")
 		return
 	}
 	s.running = true
 	s.mu.Unlock()
 
+	logger.Infof("启动同步服务，同步间隔: %v", s.syncInterval)
 	go s.syncLoop()
 }
 
@@ -45,6 +48,7 @@ func (s *SyncService) Stop() {
 	if s.running {
 		s.running = false
 		close(s.stopChan)
+		logger.Info("同步服务已停止")
 	}
 }
 
@@ -53,6 +57,7 @@ func (s *SyncService) AddSymbol(symbol string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.symbols[symbol] = true
+	logger.Infof("添加同步交易对: %s", symbol)
 }
 
 // RemoveSymbol 移除交易对
@@ -60,6 +65,7 @@ func (s *SyncService) RemoveSymbol(symbol string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.symbols, symbol)
+	logger.Infof("移除同步交易对: %s", symbol)
 }
 
 // syncLoop 同步循环
@@ -89,6 +95,13 @@ func (s *SyncService) syncAll() {
 	}
 	s.mu.RUnlock()
 
+	if len(symbols) == 0 {
+		logger.Debug("没有需要同步的交易对")
+		return
+	}
+
+	logger.Debugf("开始同步 %d 个交易对: %v", len(symbols), symbols)
+
 	// 并发同步多个交易对
 	var wg sync.WaitGroup
 	for _, symbol := range symbols {
@@ -96,12 +109,15 @@ func (s *SyncService) syncAll() {
 		go func(sym string) {
 			defer wg.Done()
 			if err := datasync.SyncSymbol(sym); err != nil {
-				// 记录错误但不中断其他同步
-				// 可以在这里添加日志
+				logger.Errorf("同步交易对失败: symbol=%s, error=%v", sym, err)
+			} else {
+				logger.Debugf("同步交易对成功: %s", sym)
 			}
 		}(symbol)
 	}
 	wg.Wait()
+
+	logger.Debugf("完成同步 %d 个交易对", len(symbols))
 }
 
 // IsRunning 检查服务是否运行中

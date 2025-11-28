@@ -1,6 +1,6 @@
-# Wails + Vue 合约行情分析应用
+# Wails + Vue 数据分析应用
 
-基于 Wails v2 + Vue 3 + ECharts 的合约行情分析工具，使用 Go+WebView 架构。
+基于 Wails v2 + Vue 3 + ECharts 的数据分析工具，使用 Go+WebView 架构。
 
 ## 架构说明
 

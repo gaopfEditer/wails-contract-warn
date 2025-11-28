@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"wails-contract-warn/logger"
 	"wails-contract-warn/models"
 )
 
@@ -32,10 +33,12 @@ func (m *MarketService) Start() {
 	m.running = true
 	m.mu.Unlock()
 
+	logger.Debug("初始化市场数据服务示例数据")
 	// 初始化一些示例数据
 	m.initSampleData()
 
 	// 启动数据更新循环
+	logger.Debug("启动市场数据更新循环")
 	go m.updateLoop()
 }
 
@@ -46,6 +49,7 @@ func (m *MarketService) Stop() {
 	if m.running {
 		m.running = false
 		close(m.stopChan)
+		logger.Debug("市场数据服务已停止")
 	}
 }
 
@@ -157,6 +161,7 @@ func (m *MarketService) Subscribe(symbol string, period string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.subscribers[symbol] = true
+	logger.Infof("订阅市场数据: symbol=%s, period=%s", symbol, period)
 	return nil
 }
 
@@ -165,6 +170,6 @@ func (m *MarketService) Unsubscribe(symbol string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.subscribers, symbol)
+	logger.Infof("取消订阅市场数据: symbol=%s", symbol)
 	return nil
 }
-

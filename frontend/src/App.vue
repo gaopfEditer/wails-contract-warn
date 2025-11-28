@@ -7,6 +7,7 @@
       @update:symbol="selectedSymbol = $event"
       @update:period="selectedPeriod = $event"
       @toggle-stream="toggleStream"
+      @test-click="showTestPanel = true"
     />
     <AlertBanner
       v-if="latestAlert"
@@ -14,30 +15,40 @@
       @close="latestAlert = null"
     />
     <main class="app-main">
-      <KLineChart
+      <TabView
         :kline-data="klineData"
         :indicators="indicators"
         :alert-signals="alertSignals"
         :symbol="selectedSymbol"
       />
     </main>
+    <TestDataPanel
+      :show="showTestPanel"
+      @close="showTestPanel = false"
+      @load-test-data="handleLoadTestData"
+    />
   </div>
 </template>
 
 <script>
+import { ref } from 'vue'
 import AppHeader from './components/AppHeader.vue'
-import KLineChart from './components/KLineChart.vue'
+import TabView from './components/TabView.vue'
 import AlertBanner from './components/AlertBanner.vue'
+import TestDataPanel from './components/TestDataPanel.vue'
 import { useMarketData } from './composables/useMarketData'
 
 export default {
   name: 'App',
   components: {
     AppHeader,
-    KLineChart,
+    TabView,
     AlertBanner,
+    TestDataPanel,
   },
   setup() {
+    const showTestPanel = ref(false)
+    
     // 使用组合式函数
     const {
       selectedSymbol,
@@ -48,7 +59,17 @@ export default {
       latestAlert,
       isStreaming,
       toggleStream,
+      loadTestData: loadTestDataToChart,
     } = useMarketData('BTCUSDT', '1m')
+
+    const handleLoadTestData = async (data) => {
+      // 将测试数据加载到图表
+      if (loadTestDataToChart) {
+        await loadTestDataToChart(data.klines, data.signals, data.indicators)
+      }
+      // 切换到图表标签页查看结果
+      // 可以通过 TabView 组件的方法切换，这里先保持面板打开
+    }
 
     return {
       selectedSymbol,
@@ -59,6 +80,8 @@ export default {
       latestAlert,
       isStreaming,
       toggleStream,
+      showTestPanel,
+      handleLoadTestData,
     }
   },
 }

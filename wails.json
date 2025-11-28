@@ -15,10 +15,11 @@
     "email": ""
   },
   "info": {
-    "productName": "合约行情分析",
+    "productName": "数据分析",
     "productVersion": "1.0.0",
     "copyright": "Copyright...",
-    "comments": "基于 Wails + Vue + ECharts 的合约行情分析工具"
+    "comments": "基于 Wails + Vue + ECharts 的数据分析工具"
   }
 }
-
+  
+  

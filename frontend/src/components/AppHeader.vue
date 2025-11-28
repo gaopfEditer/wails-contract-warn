@@ -1,6 +1,6 @@
 <template>
   <header class="app-header">
-    <h1>合约行情分析</h1>
+    <h1>数据分析122</h1>
     <div class="controls">
       <select v-model="localSymbol" @change="handleSymbolChange" class="symbol-select">
         <option value="BTCUSDT">BTC/USDT</option>
@@ -14,6 +14,9 @@
       </select>
       <button @click="handleToggleStream" class="stream-btn" :class="{ active: isStreaming }">
         {{ isStreaming ? '停止' : '开始' }}实时数据
+      </button>
+      <button @click="handleTestClick" class="test-btn">
+        测试
       </button>
     </div>
   </header>
@@ -38,7 +41,7 @@ export default {
       default: false,
     },
   },
-  emits: ['update:symbol', 'update:period', 'toggle-stream'],
+  emits: ['update:symbol', 'update:period', 'toggle-stream', 'test-click'],
   setup(props, { emit }) {
     const localSymbol = ref(props.symbol)
     const localPeriod = ref(props.period)
@@ -63,12 +66,17 @@ export default {
       emit('toggle-stream')
     }
 
+    const handleTestClick = () => {
+      emit('test-click')
+    }
+
     return {
       localSymbol,
       localPeriod,
       handleSymbolChange,
       handlePeriodChange,
       handleToggleStream,
+      handleTestClick,
     }
   },
 }
@@ -132,6 +140,22 @@ export default {
 .stream-btn.active {
   background: #3182ce;
   border-color: #3182ce;
+}
+
+.test-btn {
+  padding: 8px 16px;
+  background: #48bb78;
+  border: 1px solid #48bb78;
+  border-radius: 4px;
+  color: #ffffff;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.test-btn:hover {
+  background: #38a169;
+  border-color: #38a169;
 }
 </style>
 

@@ -81,6 +81,33 @@ export function useMarketData(initialSymbol = 'BTCUSDT', initialPeriod = '1m') {
     }
   })
 
+  // 加载测试数据到图表
+  const loadTestData = async (testKlines, testSignals, testIndicators) => {
+    try {
+      klineData.value = testKlines || []
+      alertSignals.value = testSignals || []
+      
+      // 使用提供的指标或重新计算
+      if (testIndicators) {
+        indicators.value = testIndicators
+      } else if (testKlines && testKlines.length > 0) {
+        // 如果没有提供指标，尝试从后端计算
+        // 注意：这里需要将测试数据发送到后端计算指标
+        // 或者在前端计算（如果前端有指标计算逻辑）
+        console.warn('测试数据未包含技术指标，可能需要重新计算')
+      }
+      
+      latestAlert.value = getLatestAlert(testSignals || [])
+      
+      console.log('测试数据已加载:', {
+        klines: testKlines?.length || 0,
+        signals: testSignals?.length || 0,
+      })
+    } catch (error) {
+      console.error('加载测试数据失败:', error)
+    }
+  }
+
   return {
     selectedSymbol,
     selectedPeriod,
@@ -91,6 +118,7 @@ export function useMarketData(initialSymbol = 'BTCUSDT', initialPeriod = '1m') {
     isStreaming,
     loadData,
     toggleStream,
+    loadTestData,
   }
 }
 

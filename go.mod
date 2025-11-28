@@ -6,6 +6,7 @@ toolchain go1.22.2
 
 require (
 	github.com/go-sql-driver/mysql v1.9.3
+	github.com/rs/zerolog v1.34.0
 	github.com/wailsapp/wails/v2 v2.11.0
 )
 
