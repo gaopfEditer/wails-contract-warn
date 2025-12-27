@@ -35,18 +35,15 @@ func main() {
 	isDev := os.Getenv("WAILS_ENV") == "development" || os.Getenv("DEV") == "true"
 
 	// 配置 AssetServer
-	// 在开发模式下，Wails 会自动使用 wails.json 中配置的 devServer
-	// 如果开发服务器可用，Wails 会优先使用它而不是嵌入的静态文件
+	// 在开发模式下，强制使用开发服务器，不提供嵌入的静态文件
 	var assetServer *assetserver.Options
 
 	if isDev {
-		logger.Info("开发模式：将使用前端开发服务器（devServer）")
+		logger.Info("开发模式：强制使用前端开发服务器（devServer）")
 		logger.Info("确保前端开发服务器正在运行: http://localhost:34115")
-		// 在开发模式下，仍然设置 AssetServer（作为后备）
-		// Wails 会检查 devServer 是否可用，如果可用则使用 devServer
-		assetServer = &assetserver.Options{
-			Assets: assets,
-		}
+		// 在开发模式下，不设置 AssetServer，强制 Wails 使用 devServer
+		// 如果开发服务器不可用，Wails 会报错而不是回退到嵌入文件
+		assetServer = nil
 	} else {
 		// 生产模式：使用嵌入的静态文件
 		assetServer = &assetserver.Options{
@@ -55,7 +52,7 @@ func main() {
 		logger.Info("生产模式：使用嵌入的静态文件")
 	}
 
-	err := wails.Run(&options.App{
+	appOptions := &options.App{
 		Title:            "数据分析",
 		Width:            1200,
 		Height:           800,
@@ -67,7 +64,18 @@ func main() {
 		Bind: []interface{}{
 			app,
 		},
-	})
+	}
+
+	// 在开发模式下，强制使用开发服务器
+	if isDev {
+		logger.Info("开发模式：AssetServer 已设置为 nil，Wails 将使用 wails.json 中的 devServer")
+		logger.Info("如果仍然使用嵌入文件，请检查：")
+		logger.Info("1. 开发服务器是否在 http://localhost:34115 运行")
+		logger.Info("2. wails.json 中的 devServer 配置是否正确")
+		logger.Info("3. 是否使用了 'wails dev' 命令")
+	}
+
+	err := wails.Run(appOptions)
 
 	if err != nil {
 		logger.Fatalf("应用启动失败: %v", err)

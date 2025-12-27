@@ -13,7 +13,7 @@ func CalculateIndicators(data []models.KLineData) models.Indicators {
 	}
 
 	indicators := models.Indicators{
-		MA5:      make([]float64, len(data)),
+		MA144:    make([]float64, len(data)),
 		MA10:     make([]float64, len(data)),
 		MA20:     make([]float64, len(data)),
 		MACD:     make([]float64, len(data)),
@@ -39,12 +39,12 @@ func CalculateIndicators(data []models.KLineData) models.Indicators {
 // calculateMA 计算移动平均线
 func calculateMA(data []models.KLineData, indicators models.Indicators) {
 	for i := range data {
-		if i >= 4 {
+		if i >= 143 {
 			sum := 0.0
-			for j := i - 4; j <= i; j++ {
+			for j := i - 143; j <= i; j++ {
 				sum += data[j].Close
 			}
-			indicators.MA5[i] = sum / 5
+			indicators.MA144[i] = sum / 144
 		}
 
 		if i >= 9 {

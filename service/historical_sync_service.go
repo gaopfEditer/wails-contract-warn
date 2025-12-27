@@ -98,7 +98,8 @@ func (s *HistoricalSyncService) syncLoop() {
 			logger.Infof("历史数据同步: 开始同步币种 %s (从近到远按天倒推，直到 %d 年)", symbolConfig.Symbol, s.startYear)
 
 			// 同步历史数据（按天倒推，使用时间段状态表，智能跳过已同步的数据）
-			if err := datasync.SyncSymbolHistoricalBackward(symbolConfig.Symbol, s.startYear, s.batchSize); err != nil {
+			// 限制只拉取最近7天的数据
+			if err := datasync.SyncSymbolHistoricalBackward(symbolConfig.Symbol, s.startYear, s.batchSize, 7); err != nil {
 				logger.Errorf("❌ 历史数据同步失败: symbol=%s, error=%v", symbolConfig.Symbol, err)
 			} else {
 				logger.Infof("✅ 历史数据同步成功: %s", symbolConfig.Symbol)

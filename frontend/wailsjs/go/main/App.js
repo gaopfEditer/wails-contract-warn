@@ -50,6 +50,10 @@ export function StartAutoSync(arg1, arg2) {
   return window['go']['main']['App']['StartAutoSync'](arg1, arg2);
 }
 
+export function StartGapFillService() {
+  return window['go']['main']['App']['StartGapFillService']();
+}
+
 export function StartHistoricalSyncService() {
   return window['go']['main']['App']['StartHistoricalSyncService']();
 }
@@ -60,6 +64,10 @@ export function StartMarketDataStream(arg1, arg2) {
 
 export function StartPrioritySync() {
   return window['go']['main']['App']['StartPrioritySync']();
+}
+
+export function StartRealtimePriceService() {
+  return window['go']['main']['App']['StartRealtimePriceService']();
 }
 
 export function StartRealtimeSyncService() {
@@ -84,6 +92,10 @@ export function SyncKlineData(arg1) {
 
 export function SyncKlineDataInitial(arg1, arg2) {
   return window['go']['main']['App']['SyncKlineDataInitial'](arg1, arg2);
+}
+
+export function SyncSymbolData(arg1, arg2) {
+  return window['go']['main']['App']['SyncSymbolData'](arg1, arg2);
 }
 
 export function TestBollingerHammerAlert(arg1) {

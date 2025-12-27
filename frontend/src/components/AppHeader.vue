@@ -1,16 +1,29 @@
 <template>
   <header class="app-header">
-    <h1>数据分析122</h1>
+    <h1>数据分析</h1>
     <div class="controls">
       <select v-model="localSymbol" @change="handleSymbolChange" class="symbol-select">
         <option value="BTCUSDT">BTC/USDT</option>
         <option value="ETHUSDT">ETH/USDT</option>
       </select>
       <select v-model="localPeriod" @change="handlePeriodChange" class="period-select">
-        <option value="1m">1分钟</option>
-        <option value="5m">5分钟</option>
-        <option value="15m">15分钟</option>
-        <option value="1h">1小时</option>
+        <optgroup label="分钟">
+          <option value="1m">1分钟</option>
+          <option value="5m">5分钟</option>
+          <option value="15m">15分钟</option>
+          <option value="30m">30分钟</option>
+        </optgroup>
+        <optgroup label="小时">
+          <option value="1h">1小时</option>
+          <option value="2h">2小时</option>
+          <option value="3h">3小时</option>
+          <option value="4h">4小时</option>
+        </optgroup>
+        <optgroup label="日/周/月">
+          <option value="1d">日线</option>
+          <option value="1w">周线</option>
+          <option value="1M">月线</option>
+        </optgroup>
       </select>
       <button @click="handleToggleStream" class="stream-btn" :class="{ active: isStreaming }">
         {{ isStreaming ? '停止' : '开始' }}实时数据

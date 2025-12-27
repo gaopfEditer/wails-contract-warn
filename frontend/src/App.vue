@@ -20,6 +20,7 @@
         :indicators="indicators"
         :alert-signals="alertSignals"
         :symbol="selectedSymbol"
+        :period="selectedPeriod"
       />
     </main>
     <TestDataPanel

@@ -105,29 +105,29 @@ func (s *PrioritySyncService) idleSyncLoop() {
 	}
 }
 
-// syncPrioritySymbols 同步热门币种的近期数据
+// syncPrioritySymbols 同步所有币种的近期数据
 func (s *PrioritySyncService) syncPrioritySymbols() {
 	s.mu.Lock()
 	s.lastPrioritySyncTime = time.Now()
 	s.mu.Unlock()
 
-	// 获取热门币种
-	hotSymbols, err := config.GetHotSymbols()
+	// 获取所有启用的币种（包括热门币种和小币种）
+	allSymbols, err := config.GetAllEnabledSymbols()
 	if err != nil {
-		logger.Errorf("获取热门币种配置失败: %v", err)
+		logger.Errorf("获取币种配置失败: %v", err)
 		return
 	}
 
-	if len(hotSymbols) == 0 {
-		logger.Debug("没有配置热门币种")
+	if len(allSymbols) == 0 {
+		logger.Debug("没有配置币种")
 		return
 	}
 
-	logger.Infof("开始优先同步 %d 个热门币种的近期数据", len(hotSymbols))
+	logger.Infof("开始优先同步 %d 个币种的近期数据", len(allSymbols))
 
-	// 顺序同步热门币种（避免并发请求过多导致API限流）
+	// 顺序同步所有币种（避免并发请求过多导致API限流）
 	// 优先模式：只同步近期数据
-	for _, symbolConfig := range hotSymbols {
+	for _, symbolConfig := range allSymbols {
 		logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		logger.Infof("开始同步币种: %s", symbolConfig.Symbol)
 		if err := datasync.SyncSymbolWithPriority(symbolConfig.Symbol, true); err != nil {
@@ -145,7 +145,7 @@ func (s *PrioritySyncService) syncPrioritySymbols() {
 		time.Sleep(300 * time.Millisecond)
 	}
 
-	logger.Debugf("完成优先同步 %d 个热门币种", len(hotSymbols))
+	logger.Debugf("完成优先同步 %d 个币种", len(allSymbols))
 }
 
 // syncIdleSymbols 空闲时同步历史数据和小币种

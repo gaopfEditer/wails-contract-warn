@@ -25,11 +25,15 @@ export function ProxyAPI(arg1:string,arg2:string):Promise<string>;
 
 export function StartAutoSync(arg1:string,arg2:number):Promise<string>;
 
+export function StartGapFillService():Promise<void>;
+
 export function StartHistoricalSyncService():Promise<void>;
 
 export function StartMarketDataStream(arg1:string,arg2:string):Promise<void>;
 
 export function StartPrioritySync():Promise<string>;
+
+export function StartRealtimePriceService():Promise<void>;
 
 export function StartRealtimeSyncService():Promise<string>;
 
@@ -42,5 +46,7 @@ export function StopRealtimeSyncService():Promise<string>;
 export function SyncKlineData(arg1:string):Promise<string>;
 
 export function SyncKlineDataInitial(arg1:string,arg2:number):Promise<string>;
+
+export function SyncSymbolData(arg1:string,arg2:number):Promise<string>;
 
 export function TestBollingerHammerAlert(arg1:string):Promise<string>;

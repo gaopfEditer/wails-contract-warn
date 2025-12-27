@@ -40,7 +40,7 @@ func (s *RealtimeSyncService) Start() {
 	s.running = true
 	s.mu.Unlock()
 
-	logger.Infof("启动实时数据同步服务，同步间隔: %v", s.syncInterval)
+	logger.Infof("启动实时数据同步服务，执行一次同步后自动停止")
 
 	// 立即执行一次同步
 	go s.syncLoop()
@@ -52,8 +52,17 @@ func (s *RealtimeSyncService) Stop() {
 	defer s.mu.Unlock()
 	if s.running {
 		s.running = false
-		close(s.stopChan)
+		// 注意：syncLoop现在会自动停止，所以这里主要是标记状态
+		// 为了安全，尝试关闭channel（如果还没有关闭）
+		select {
+		case <-s.stopChan:
+			// channel已经关闭，不需要再次关闭
+		default:
+			close(s.stopChan)
+		}
 		logger.Info("实时数据同步服务已停止")
+	} else {
+		logger.Debug("实时数据同步服务未运行，无需停止")
 	}
 }
 
@@ -66,40 +75,36 @@ func (s *RealtimeSyncService) IsRunning() bool {
 
 // syncLoop 实时数据同步循环
 func (s *RealtimeSyncService) syncLoop() {
-	ticker := time.NewTicker(s.syncInterval)
-	defer ticker.Stop()
-
-	// 立即执行一次
+	// 立即执行一次同步
 	s.syncRealtimeData()
 
-	for {
-		select {
-		case <-s.stopChan:
-			return
-		case <-ticker.C:
-			s.syncRealtimeData()
-		}
+	// 同步完成后自动停止
+	s.mu.Lock()
+	if s.running {
+		s.running = false
+		logger.Info("实时数据同步完成，服务已自动停止")
 	}
+	s.mu.Unlock()
 }
 
 // syncRealtimeData 同步实时数据
 func (s *RealtimeSyncService) syncRealtimeData() {
-	// 获取热门币种（实时数据主要关注热门币种）
-	hotSymbols, err := config.GetHotSymbols()
+	// 获取所有启用的币种（包括热门币种和小币种）
+	allSymbols, err := config.GetAllEnabledSymbols()
 	if err != nil {
-		logger.Errorf("获取热门币种配置失败: %v", err)
+		logger.Errorf("获取币种配置失败: %v", err)
 		return
 	}
 
-	if len(hotSymbols) == 0 {
-		logger.Debug("没有配置热门币种，跳过实时数据同步")
+	if len(allSymbols) == 0 {
+		logger.Debug("没有配置币种，跳过实时数据同步")
 		return
 	}
 
-	logger.Infof("开始实时数据同步: %d 个热门币种", len(hotSymbols))
+	logger.Infof("开始实时数据同步: %d 个币种", len(allSymbols))
 
-	// 顺序同步热门币种的实时数据（近期数据模式）
-	for _, symbolConfig := range hotSymbols {
+	// 顺序同步所有币种的实时数据（近期数据模式）
+	for _, symbolConfig := range allSymbols {
 		logger.Infof("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		logger.Infof("实时同步币种: %s", symbolConfig.Symbol)
 
@@ -116,5 +121,5 @@ func (s *RealtimeSyncService) syncRealtimeData() {
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	logger.Debugf("完成实时数据同步: %d 个热门币种", len(hotSymbols))
+		logger.Debugf("完成实时数据同步: %d 个币种", len(allSymbols))
 }

@@ -20,6 +20,7 @@
         :indicators="indicators"
         :alert-signals="alertSignals"
         :symbol="symbol"
+        :period="period"
       />
       <AlertList v-if="activeTab === 'alert'" />
     </div>
@@ -55,6 +56,10 @@ export default {
     symbol: {
       type: String,
       default: 'BTCUSDT',
+    },
+    period: {
+      type: String,
+      default: '1m',
     },
   },
   setup() {

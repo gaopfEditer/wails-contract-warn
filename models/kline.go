@@ -12,7 +12,7 @@ type KLineData struct {
 
 // Indicators 技术指标
 type Indicators struct {
-	MA5      []float64 `json:"ma5"`
+	MA144    []float64 `json:"ma144"`
 	MA10     []float64 `json:"ma10"`
 	MA20     []float64 `json:"ma20"`
 	MACD     []float64 `json:"macd"`

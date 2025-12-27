@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 	"time"
 
 	"wails-contract-warn/api"
@@ -18,6 +19,8 @@ import (
 	"wails-contract-warn/signal"
 	datasync "wails-contract-warn/sync"
 	"wails-contract-warn/utils"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // App 结构体（控制器层）
@@ -28,6 +31,8 @@ type App struct {
 	prioritySyncService   *service.PrioritySyncService // 保留用于兼容
 	historicalSyncService *service.HistoricalSyncService
 	realtimeSyncService   *service.RealtimeSyncService
+	realtimePriceService  *service.RealtimePriceService
+	gapFillService        *service.GapFillService
 	proxyClient           *api.ProxyClient
 	dbInit                bool
 }
@@ -64,6 +69,10 @@ func (a *App) startup(ctx context.Context) {
 			if err := a.StartHistoricalSyncService(); err != nil {
 				logger.Errorf("启动历史数据同步服务失败: %v", err)
 			}
+
+			// 启动实时价格服务和历史空缺补充服务
+			a.StartRealtimePriceService()
+			a.StartGapFillService()
 		}
 	} else {
 		logger.Warn("未配置数据库连接，将使用内存模式")
@@ -104,6 +113,16 @@ func (a *App) shutdown(ctx context.Context) {
 		logger.Debug("实时数据同步服务已停止")
 	}
 
+	if a.realtimePriceService != nil {
+		a.realtimePriceService.Stop()
+		logger.Debug("实时价格服务已停止")
+	}
+
+	if a.gapFillService != nil {
+		a.gapFillService.Stop()
+		logger.Debug("历史空缺补充服务已停止")
+	}
+
 	if a.dbInit {
 		database.CloseDB()
 		logger.Debug("数据库连接已关闭")
@@ -122,22 +141,43 @@ func (a *App) GetMarketData(symbol string, period string) (string, error) {
 		return a.getMarketDataFromDB(symbol, period)
 	}
 
-	// 否则使用内存数据（兼容模式）
-	logger.Debug("从内存读取市场数据")
-	data := a.market.GetKLineData(symbol, period)
-	jsonData, err := json.Marshal(data)
+	// 数据库未初始化，返回空数组
+	logger.Warn("数据库未初始化，返回空数据。请先初始化数据库。")
+	emptyData := []models.KLineData{}
+	jsonData, err := json.Marshal(emptyData)
 	if err != nil {
 		logger.Errorf("序列化市场数据失败: %v", err)
 		return "", err
 	}
 
-	logger.Debugf("成功获取市场数据，共 %d 条记录", len(data))
+	logger.Debugf("返回空数据（数据库未初始化）")
 	return string(jsonData), nil
+}
+
+// normalizeSymbol 规范化symbol格式，将 BTCUSDT 转换为 BTC_USDT
+func normalizeSymbol(symbol string) string {
+	// 如果已经包含下划线，直接返回
+	if strings.Contains(symbol, "_") {
+		return symbol
+	}
+	// 尝试将 BTCUSDT 转换为 BTC_USDT
+	// 常见的USDT交易对
+	usdtPairs := []string{"USDT", "USDC", "BTC", "ETH", "BNB", "BUSD"}
+	for _, pair := range usdtPairs {
+		if strings.HasSuffix(symbol, pair) && len(symbol) > len(pair) {
+			base := symbol[:len(symbol)-len(pair)]
+			return base + "_" + pair
+		}
+	}
+	// 如果无法识别，返回原值
+	return symbol
 }
 
 // getMarketDataFromDB 从数据库获取市场数据并聚合
 func (a *App) getMarketDataFromDB(symbol string, period string) (string, error) {
-	logger.Debugf("从数据库获取市场数据: symbol=%s, period=%s", symbol, period)
+	// 规范化symbol格式
+	normalizedSymbol := normalizeSymbol(symbol)
+	logger.Debugf("从数据库获取市场数据: symbol=%s (规范化后: %s), period=%s", symbol, normalizedSymbol, period)
 
 	// 1. 解析周期
 	targetIntervalMin := utils.ParseIntervalToMinutes(period)
@@ -148,17 +188,34 @@ func (a *App) getMarketDataFromDB(symbol string, period string) (string, error) 
 	needed1mCount := utils.CalculateNeeded1mCount(targetCount, targetIntervalMin)
 	logger.Debugf("需要 %d 根1分钟K线", needed1mCount)
 
-	// 3. 从数据库获取1分钟K线
-	klines1m, err := database.GetKLines1mByCount(symbol, needed1mCount)
+	// 3. 从数据库获取1分钟K线（使用规范化后的symbol）
+	klines1m, err := database.GetKLines1mByCount(normalizedSymbol, needed1mCount)
 	if err != nil {
-		logger.Errorf("从数据库获取K线失败: %v", err)
+		logger.Errorf("从数据库获取K线失败: symbol=%s, normalizedSymbol=%s, error=%v", symbol, normalizedSymbol, err)
 		return "", err
 	}
-	logger.Debugf("从数据库获取到 %d 根1分钟K线", len(klines1m))
+	logger.Infof("从数据库获取到 %d 根1分钟K线: symbol=%s, normalizedSymbol=%s", len(klines1m), symbol, normalizedSymbol)
+	
+	// 如果没有数据，记录警告并检查表是否存在
+	if len(klines1m) == 0 {
+		// 检查表是否存在
+		lastTime, err := database.GetLatestKLineTime(normalizedSymbol)
+		if err != nil {
+			logger.Warnf("数据库中暂无数据: symbol=%s, normalizedSymbol=%s, 错误: %v", symbol, normalizedSymbol, err)
+		} else if lastTime == 0 {
+			logger.Warnf("数据库中暂无数据: symbol=%s, normalizedSymbol=%s, 表可能不存在或为空", symbol, normalizedSymbol)
+		} else {
+			logger.Warnf("数据库中暂无数据: symbol=%s, normalizedSymbol=%s, 但表存在，最新数据时间: %d", symbol, normalizedSymbol, lastTime)
+		}
+		// 返回空数组
+		emptyResult := []models.KLineData{}
+		jsonData, _ := json.Marshal(emptyResult)
+		return string(jsonData), nil
+	}
 
 	// 4. 聚合为目标周期
 	klines := utils.AggregateKlines(klines1m, targetIntervalMin)
-	logger.Debugf("聚合后得到 %d 根K线", len(klines))
+	logger.Infof("聚合后得到 %d 根K线 (从 %d 根1分钟K线聚合)", len(klines), len(klines1m))
 
 	// 5. 转换为前端需要的格式
 	result := make([]models.KLineData, len(klines))
@@ -189,11 +246,14 @@ func (a *App) GetIndicators(symbol string, period string) (string, error) {
 
 	// 如果数据库已初始化，从数据库读取
 	if a.dbInit {
+		// 规范化symbol格式
+		normalizedSymbol := normalizeSymbol(symbol)
 		targetIntervalMin := utils.ParseIntervalToMinutes(period)
 		targetCount := 1000
 		needed1mCount := utils.CalculateNeeded1mCount(targetCount, targetIntervalMin)
-		klines1m, err := database.GetKLines1mByCount(symbol, needed1mCount)
+		klines1m, err := database.GetKLines1mByCount(normalizedSymbol, needed1mCount)
 		if err != nil {
+			logger.Errorf("从数据库获取K线失败: %v", err)
 			return "", err
 		}
 		klines := utils.AggregateKlines(klines1m, targetIntervalMin)
@@ -209,7 +269,9 @@ func (a *App) GetIndicators(symbol string, period string) (string, error) {
 			}
 		}
 	} else {
-		klineData = a.market.GetKLineData(symbol, period)
+		// 数据库未初始化，返回空指标
+		logger.Warn("数据库未初始化，返回空指标。请先初始化数据库。")
+		klineData = []models.KLineData{}
 	}
 
 	indicators := indicator.CalculateIndicators(klineData)
@@ -226,11 +288,14 @@ func (a *App) GetAlertSignals(symbol string, period string) (string, error) {
 
 	// 如果数据库已初始化，从数据库读取
 	if a.dbInit {
+		// 规范化symbol格式
+		normalizedSymbol := normalizeSymbol(symbol)
 		targetIntervalMin := utils.ParseIntervalToMinutes(period)
 		targetCount := 1000
 		needed1mCount := utils.CalculateNeeded1mCount(targetCount, targetIntervalMin)
-		klines1m, err := database.GetKLines1mByCount(symbol, needed1mCount)
+		klines1m, err := database.GetKLines1mByCount(normalizedSymbol, needed1mCount)
 		if err != nil {
+			logger.Errorf("从数据库获取K线失败: %v", err)
 			return "", err
 		}
 		klines := utils.AggregateKlines(klines1m, targetIntervalMin)
@@ -246,7 +311,9 @@ func (a *App) GetAlertSignals(symbol string, period string) (string, error) {
 			}
 		}
 	} else {
-		klineData = a.market.GetKLineData(symbol, period)
+		// 数据库未初始化，返回空信号
+		logger.Warn("数据库未初始化，返回空信号。请先初始化数据库。")
+		klineData = []models.KLineData{}
 	}
 
 	signals := signal.DetectAllSignals(klineData)
@@ -284,6 +351,28 @@ func (a *App) SyncKlineData(symbol string) (string, error) {
 
 	logger.Infof("K线数据同步成功: symbol=%s", symbol)
 	return "同步成功", nil
+}
+
+// SyncSymbolData 同步指定币种的数据（按周分批获取）
+// 从当日向前，先获取一周，再获取一周，按天检查状态
+func (a *App) SyncSymbolData(symbol string, weeks int) (string, error) {
+	if !a.dbInit {
+		return "", fmt.Errorf("数据库未初始化")
+	}
+
+	if weeks <= 0 {
+		weeks = 1 // 默认1周
+	}
+
+	logger.Infof("开始同步币种数据: symbol=%s, weeks=%d", symbol, weeks)
+	
+	// 使用按周分批获取的方法
+	err := datasync.SyncSymbolByWeeks(symbol, weeks)
+	if err != nil {
+		return "", fmt.Errorf("同步失败: %w", err)
+	}
+
+	return fmt.Sprintf("同步完成: %s (已获取 %d 周数据)", symbol, weeks), nil
 }
 
 // SyncKlineDataInitial 首次同步K线数据（拉取历史）
@@ -382,13 +471,13 @@ func (a *App) StartRealtimeSyncService() (string, error) {
 	}
 
 	// 启动实时数据同步服务
-	// 每分钟获取一次最新数据
-	realtimeService := service.NewRealtimeSyncService(60) // 60秒 = 1分钟
+	// 执行一次同步后自动停止
+	realtimeService := service.NewRealtimeSyncService(15) // 间隔参数已不再使用，但保留以保持兼容性
 	realtimeService.Start()
 	a.realtimeSyncService = realtimeService
-	logger.Info("实时数据同步服务已启动（同步间隔: 1分钟）")
+	logger.Info("实时数据同步服务已启动（执行一次同步后自动停止）")
 
-	return "实时数据同步服务已启动（每分钟同步一次最新数据）", nil
+	return "实时数据同步服务已启动，同步完成后将自动停止", nil
 }
 
 // StopRealtimeSyncService 停止实时数据同步服务
@@ -409,6 +498,53 @@ func (a *App) IsRealtimeSyncRunning() bool {
 		return false
 	}
 	return a.realtimeSyncService.IsRunning()
+}
+
+// StartRealtimePriceService 启动实时价格服务
+func (a *App) StartRealtimePriceService() {
+	if !a.dbInit {
+		logger.Warn("数据库未初始化，无法启动实时价格服务")
+		return
+	}
+
+	// 如果服务已经在运行，直接返回
+	if a.realtimePriceService != nil && a.realtimePriceService.IsRunning() {
+		logger.Warn("实时价格服务已在运行")
+		return
+	}
+
+	// 创建EventEmitter函数
+	eventEmitter := func(event string, data ...interface{}) {
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, event, data...)
+		}
+	}
+
+	// 启动实时价格服务
+	realtimePriceService := service.NewRealtimePriceService(a.ctx, eventEmitter)
+	realtimePriceService.Start()
+	a.realtimePriceService = realtimePriceService
+	logger.Info("实时价格服务已启动（每10秒获取一次最新价格）")
+}
+
+// StartGapFillService 启动历史空缺补充服务
+func (a *App) StartGapFillService() {
+	if !a.dbInit {
+		logger.Warn("数据库未初始化，无法启动历史空缺补充服务")
+		return
+	}
+
+	// 如果服务已经在运行，直接返回
+	if a.gapFillService != nil && a.gapFillService.IsRunning() {
+		logger.Warn("历史空缺补充服务已在运行")
+		return
+	}
+
+	// 启动历史空缺补充服务（每5分钟检查一次）
+	gapFillService := service.NewGapFillService(5)
+	gapFillService.Start()
+	a.gapFillService = gapFillService
+	logger.Info("历史空缺补充服务已启动（每5分钟检查一次当天空缺）")
 }
 
 // StartPrioritySync 启动优先级同步服务（从配置文件读取币种）（保留用于兼容）

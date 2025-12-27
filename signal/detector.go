@@ -32,6 +32,9 @@ func DetectAllSignals(data []models.KLineData) []models.AlertSignal {
 	// 5. 吞没形态（结合布林带）
 	allSignals = append(allSignals, detectBollingerEngulfing(data, bands)...)
 
+	// 6. 组合强信号：在3-5个K线中出现多个锤子线或顶部针形
+	allSignals = append(allSignals, detectStrongPatternGroup(data, bands)...)
+
 	return allSignals
 }
 
@@ -167,20 +170,53 @@ func IsConsecutiveHammers(data []models.KLineData, index int, count int) bool {
 	return true
 }
 
+// IsTopPin 判断是否为顶部针形（上影线很长，下影线很短）
+func IsTopPin(candle models.KLineData) bool {
+	if candle.High == candle.Low {
+		return false
+	}
+
+	body := math.Abs(candle.Close - candle.Open)
+	range_ := candle.High - candle.Low
+	lowerShadow := math.Min(candle.Open, candle.Close) - candle.Low
+	upperShadow := candle.High - math.Max(candle.Open, candle.Close)
+
+	// 上影线至少是实体的2倍，下影线很小
+	// 且上影线要足够长（至少是总波动的50%）
+	return range_ > 0 && upperShadow >= body*2 && lowerShadow <= body*0.3 && upperShadow >= range_*0.5
+}
+
+// IsLongTopPin 判断是否为较长的顶部针形（上影线更长）
+func IsLongTopPin(candle models.KLineData) bool {
+	if candle.High == candle.Low {
+		return false
+	}
+
+	body := math.Abs(candle.Close - candle.Open)
+	range_ := candle.High - candle.Low
+	lowerShadow := math.Min(candle.Open, candle.Close) - candle.Low
+	upperShadow := candle.High - math.Max(candle.Open, candle.Close)
+
+	// 上影线至少是实体的3倍，下影线很小
+	// 且上影线要足够长（至少是总波动的60%）
+	return range_ > 0 && upperShadow >= body*3 && lowerShadow <= body*0.2 && upperShadow >= range_*0.6
+}
+
 // ==================== 信号检测函数 ====================
 
 // detectBollingerDojiBottom 检测布林带下轨 + 十字星
+// 下轨信号：K线最低价与下轨价差 < 上下轨高度的10%
 func detectBollingerDojiBottom(data []models.KLineData, bands []struct {
 	upper  float64
 	middle float64
 	lower  float64
 }) []models.AlertSignal {
 	var signals []models.AlertSignal
-	tolerance := 0.01
 	dojiThreshold := 0.001
+	bandToleranceRatio := 0.1 // 上下轨高度的10%
 
 	for i := range data {
-		if i < 19 || bands[i].lower == 0 {
+		if i < 19 || bands[i].lower == 0 || bands[i].upper == 0 {
 			continue
 		}
 
@@ -190,10 +226,15 @@ func detectBollingerDojiBottom(data []models.KLineData, bands []struct {
 		}
 
 		lower := bands[i].lower
-		isNearLower := candle.Low <= lower*(1+tolerance) ||
-			candle.Close <= lower*(1+tolerance)
+		upper := bands[i].upper
+		bandHeight := upper - lower
 
-		if isNearLower {
+		// 下轨信号：K线最低价与下轨价差 < 上下轨高度的10%
+		// 即：candle.Low - lower <= bandHeight * 0.1
+		priceDiff := candle.Low - lower
+		isAtLowerBand := priceDiff >= 0 && priceDiff <= bandHeight*bandToleranceRatio
+
+		if isAtLowerBand {
 			signals = append(signals, models.AlertSignal{
 				Index:     i,
 				Time:      candle.Time,
@@ -210,16 +251,17 @@ func detectBollingerDojiBottom(data []models.KLineData, bands []struct {
 }
 
 // detectBollingerHammer 检测布林带下轨 + 锤子
+// 下轨信号：K线最低价与下轨价差 < 上下轨高度的10%
 func detectBollingerHammer(data []models.KLineData, bands []struct {
 	upper  float64
 	middle float64
 	lower  float64
 }) []models.AlertSignal {
 	var signals []models.AlertSignal
-	tolerance := 0.01
+	bandToleranceRatio := 0.1 // 上下轨高度的10%
 
 	for i := range data {
-		if i < 19 || bands[i].lower == 0 {
+		if i < 19 || bands[i].lower == 0 || bands[i].upper == 0 {
 			continue
 		}
 
@@ -229,10 +271,15 @@ func detectBollingerHammer(data []models.KLineData, bands []struct {
 		}
 
 		lower := bands[i].lower
-		isNearLower := candle.Low <= lower*(1+tolerance) ||
-			candle.Close <= lower*(1+tolerance)
+		upper := bands[i].upper
+		bandHeight := upper - lower
 
-		if isNearLower {
+		// 下轨信号：K线最低价与下轨价差 < 上下轨高度的10%
+		// 即：candle.Low - lower <= bandHeight * 0.1
+		priceDiff := candle.Low - lower
+		isAtLowerBand := priceDiff >= 0 && priceDiff <= bandHeight*bandToleranceRatio
+
+		if isAtLowerBand {
 			signals = append(signals, models.AlertSignal{
 				Index:     i,
 				Time:      candle.Time,
@@ -249,17 +296,18 @@ func detectBollingerHammer(data []models.KLineData, bands []struct {
 }
 
 // detectBollingerConsecutiveHammers 检测布林带下轨 + 连续锤子
+// 下轨信号：K线最低价与下轨价差 < 上下轨高度的10%
 func detectBollingerConsecutiveHammers(data []models.KLineData, bands []struct {
 	upper  float64
 	middle float64
 	lower  float64
 }) []models.AlertSignal {
 	var signals []models.AlertSignal
-	tolerance := 0.01
+	bandToleranceRatio := 0.1 // 上下轨高度的10%
 	consecutiveCount := 2
 
 	for i := range data {
-		if i < 19 || bands[i].lower == 0 {
+		if i < 19 || bands[i].lower == 0 || bands[i].upper == 0 {
 			continue
 		}
 
@@ -269,10 +317,15 @@ func detectBollingerConsecutiveHammers(data []models.KLineData, bands []struct {
 
 		candle := data[i]
 		lower := bands[i].lower
-		isNearLower := candle.Low <= lower*(1+tolerance) ||
-			candle.Close <= lower*(1+tolerance)
+		upper := bands[i].upper
+		bandHeight := upper - lower
 
-		if isNearLower {
+		// 下轨信号：K线最低价与下轨价差 < 上下轨高度的10%
+		// 即：candle.Low - lower <= bandHeight * 0.1
+		priceDiff := candle.Low - lower
+		isAtLowerBand := priceDiff >= 0 && priceDiff <= bandHeight*bandToleranceRatio
+
+		if isAtLowerBand {
 			signals = append(signals, models.AlertSignal{
 				Index:     i,
 				Time:      candle.Time,
@@ -289,16 +342,17 @@ func detectBollingerConsecutiveHammers(data []models.KLineData, bands []struct {
 }
 
 // detectBollingerHangingMan 检测布林带上轨 + 吊颈
+// 上轨信号：K线最高价与上轨价差 < 上下轨高度的10%
 func detectBollingerHangingMan(data []models.KLineData, bands []struct {
 	upper  float64
 	middle float64
 	lower  float64
 }) []models.AlertSignal {
 	var signals []models.AlertSignal
-	tolerance := 0.01
+	bandToleranceRatio := 0.1 // 上下轨高度的10%
 
 	for i := range data {
-		if i < 19 || bands[i].upper == 0 {
+		if i < 19 || bands[i].upper == 0 || bands[i].lower == 0 {
 			continue
 		}
 
@@ -308,10 +362,15 @@ func detectBollingerHangingMan(data []models.KLineData, bands []struct {
 		}
 
 		upper := bands[i].upper
-		isNearUpper := candle.High >= upper*(1-tolerance) ||
-			candle.Close >= upper*(1-tolerance)
+		lower := bands[i].lower
+		bandHeight := upper - lower
 
-		if isNearUpper {
+		// 上轨信号：K线最高价与上轨价差 < 上下轨高度的10%
+		// 即：upper - candle.High <= bandHeight * 0.1
+		priceDiff := upper - candle.High
+		isAtUpperBand := priceDiff >= 0 && priceDiff <= bandHeight*bandToleranceRatio
+
+		if isAtUpperBand {
 			signals = append(signals, models.AlertSignal{
 				Index:     i,
 				Time:      candle.Time,
@@ -328,13 +387,15 @@ func detectBollingerHangingMan(data []models.KLineData, bands []struct {
 }
 
 // detectBollingerEngulfing 检测布林带附近的吞没形态
+// 下轨信号：K线最低价与下轨价差 < 上下轨高度的10%
+// 上轨信号：K线最高价与上轨价差 < 上下轨高度的10%
 func detectBollingerEngulfing(data []models.KLineData, bands []struct {
 	upper  float64
 	middle float64
 	lower  float64
 }) []models.AlertSignal {
 	var signals []models.AlertSignal
-	tolerance := 0.01
+	bandToleranceRatio := 0.1 // 上下轨高度的10%
 
 	for i := 1; i < len(data); i++ {
 		if i < 19 {
@@ -350,12 +411,18 @@ func detectBollingerEngulfing(data []models.KLineData, bands []struct {
 		}
 
 		// 看涨吞没在下轨附近
-		if isBullish && bands[i].lower > 0 {
+		if isBullish && bands[i].lower > 0 && bands[i].upper > 0 {
 			lower := bands[i].lower
-			isNearLower := curr.Low <= lower*(1+tolerance) ||
-				prev.Low <= lower*(1+tolerance)
+			upper := bands[i].upper
+			bandHeight := upper - lower
 
-			if isNearLower {
+			// 检查当前K线或前一根K线是否在下轨附近
+			currPriceDiff := curr.Low - lower
+			prevPriceDiff := prev.Low - lower
+			isAtLowerBand := (currPriceDiff >= 0 && currPriceDiff <= bandHeight*bandToleranceRatio) ||
+				(prevPriceDiff >= 0 && prevPriceDiff <= bandHeight*bandToleranceRatio)
+
+			if isAtLowerBand {
 				signals = append(signals, models.AlertSignal{
 					Index:     i,
 					Time:      curr.Time,
@@ -369,12 +436,18 @@ func detectBollingerEngulfing(data []models.KLineData, bands []struct {
 		}
 
 		// 看跌吞没在上轨附近
-		if !isBullish && bands[i].upper > 0 {
+		if !isBullish && bands[i].upper > 0 && bands[i].lower > 0 {
 			upper := bands[i].upper
-			isNearUpper := curr.High >= upper*(1-tolerance) ||
-				prev.High >= upper*(1-tolerance)
+			lower := bands[i].lower
+			bandHeight := upper - lower
 
-			if isNearUpper {
+			// 检查当前K线或前一根K线是否在上轨附近
+			currPriceDiff := upper - curr.High
+			prevPriceDiff := upper - prev.High
+			isAtUpperBand := (currPriceDiff >= 0 && currPriceDiff <= bandHeight*bandToleranceRatio) ||
+				(prevPriceDiff >= 0 && prevPriceDiff <= bandHeight*bandToleranceRatio)
+
+			if isAtUpperBand {
 				signals = append(signals, models.AlertSignal{
 					Index:     i,
 					Time:      curr.Time,
@@ -384,6 +457,123 @@ func detectBollingerEngulfing(data []models.KLineData, bands []struct {
 					Type:      "bollinger_bearish_engulfing",
 					Strength:  0.88,
 				})
+			}
+		}
+	}
+
+	return signals
+}
+
+// detectStrongPatternGroup 检测组合强信号
+// 在3-5个K线中检测出现多个锤子线或较长的顶部针形，记为一组强信号
+func detectStrongPatternGroup(data []models.KLineData, bands []struct {
+	upper  float64
+	middle float64
+	lower  float64
+}) []models.AlertSignal {
+	var signals []models.AlertSignal
+	minWindowSize := 3  // 最小窗口：3个K线
+	maxWindowSize := 5  // 最大窗口：5个K线
+	minPatternCount := 2 // 最少需要2个特定形态
+
+	for i := maxWindowSize - 1; i < len(data); i++ {
+		if i < 19 || bands[i].lower == 0 || bands[i].upper == 0 {
+			continue
+		}
+
+		// 在3-5个K线窗口中检测
+		for windowSize := minWindowSize; windowSize <= maxWindowSize; windowSize++ {
+			if i < windowSize-1 {
+				continue
+			}
+
+			// 统计窗口内的形态
+			hammerCount := 0
+			longTopPinCount := 0
+			patternIndices := []int{} // 记录形态出现的位置
+
+			// 检查窗口内的每个K线
+			for j := i - windowSize + 1; j <= i; j++ {
+				if j < 0 || j >= len(data) {
+					continue
+				}
+
+				candle := data[j]
+				if IsHammer(candle) {
+					hammerCount++
+					patternIndices = append(patternIndices, j)
+				} else if IsLongTopPin(candle) {
+					longTopPinCount++
+					patternIndices = append(patternIndices, j)
+				}
+			}
+
+			// 计算总形态数
+			totalPatternCount := hammerCount + longTopPinCount
+
+			// 如果满足条件：至少有minPatternCount个形态
+			if totalPatternCount >= minPatternCount {
+				// 确定信号类型和强度
+				signalType := ""
+				strength := 0.0
+				price := 0.0
+				lower := bands[i].lower
+				upper := bands[i].upper
+
+				// 根据形态组合确定信号类型
+				if hammerCount >= 2 {
+					// 多个锤子线：看涨信号
+					signalType = "strong_hammer_group"
+					strength = 0.92 + float64(hammerCount-2)*0.02 // 2个锤子0.92，3个0.94，4个0.96，5个0.98
+					if strength > 0.98 {
+						strength = 0.98
+					}
+					// 使用最后一个锤子线的价格
+					lastCandle := data[i]
+					price = lastCandle.Low
+				} else if longTopPinCount >= 2 {
+					// 多个顶部针形：看跌信号
+					signalType = "strong_top_pin_group"
+					strength = 0.90 + float64(longTopPinCount-2)*0.02 // 2个针形0.90，3个0.92，4个0.94，5个0.96
+					if strength > 0.96 {
+						strength = 0.96
+					}
+					// 使用最后一个针形的价格
+					lastCandle := data[i]
+					price = lastCandle.High
+				} else if totalPatternCount >= 2 {
+					// 混合形态：根据数量确定强度
+					signalType = "strong_mixed_pattern_group"
+					strength = 0.88 + float64(totalPatternCount-2)*0.02
+					if strength > 0.94 {
+						strength = 0.94
+					}
+					// 使用最后一个形态的价格
+					lastCandle := data[i]
+					if hammerCount > longTopPinCount {
+						price = lastCandle.Low
+					} else {
+						price = lastCandle.High
+					}
+				}
+
+				// 如果确定了信号类型，创建信号
+				if signalType != "" {
+					lastCandle := data[i]
+					signals = append(signals, models.AlertSignal{
+						Index:     i,
+						Time:      lastCandle.Time,
+						Price:     price,
+						Close:     lastCandle.Close,
+						LowerBand: lower,
+						UpperBand: upper,
+						Type:      signalType,
+						Strength:  strength,
+					})
+
+					// 找到一个窗口后，不再检查更大的窗口（避免重复）
+					break
+				}
 			}
 		}
 	}

@@ -52,6 +52,31 @@ export const SIGNAL_TYPES = {
     borderColor: '#ef5350',
     description: '价格在布林带上轨附近出现看跌吞没形态',
   },
+  // 组合强信号
+  strong_hammer_group: {
+    name: '强信号-多锤子组合',
+    icon: '🔨🔨',
+    color: '#ff1744',
+    bgColor: '#ffebee',
+    borderColor: '#ff1744',
+    description: '在3-5个K线中出现多个锤子线，强烈看涨信号',
+  },
+  strong_top_pin_group: {
+    name: '强信号-多顶部针形',
+    icon: '📌📌',
+    color: '#ff6f00',
+    bgColor: '#fff3e0',
+    borderColor: '#ff6f00',
+    description: '在3-5个K线中出现多个较长的顶部针形，强烈看跌信号',
+  },
+  strong_mixed_pattern_group: {
+    name: '强信号-混合形态组合',
+    icon: '⚡',
+    color: '#e91e63',
+    bgColor: '#fce4ec',
+    borderColor: '#e91e63',
+    description: '在3-5个K线中出现多个锤子线或顶部针形的混合组合',
+  },
 }
 
 /**

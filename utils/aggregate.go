@@ -28,10 +28,18 @@ func ParseIntervalToMinutes(interval string) int {
 		return 30
 	case "1h":
 		return 60
+	case "2h":
+		return 120
+	case "3h":
+		return 180
 	case "4h":
 		return 240
 	case "1d":
-		return 1440
+		return 1440 // 日线：24小时 = 1440分钟
+	case "1w":
+		return 10080 // 周线：7天 = 10080分钟
+	case "1M":
+		return 43200 // 月线：30天 = 43200分钟（简化处理，实际月份天数不同）
 	default:
 		// 尝试解析数字+m/h/d格式
 		// 这里简化处理，实际可以更复杂

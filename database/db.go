@@ -160,11 +160,20 @@ func GetTableName(symbol string) string {
 	return fmt.Sprintf("klines_1m_%s", tableName)
 }
 
+// SaveKLine1mResult 保存结果
+type SaveKLine1mResult struct {
+	InsertedCount int // 成功插入的数量
+	SkippedCount  int // 跳过的数量（已存在）
+	ErrorCount    int // 失败的数量
+}
+
 // SaveKLine1m 保存1分钟K线数据（批量插入，忽略重复）
 // 每个币种存储到独立的表
-func SaveKLine1m(klines []KLine1m) error {
+// 返回插入统计信息
+func SaveKLine1m(klines []KLine1m) (*SaveKLine1mResult, error) {
+	result := &SaveKLine1mResult{}
 	if len(klines) == 0 {
-		return nil
+		return result, nil
 	}
 
 	// 按表名（币种）分组K线数据
@@ -180,13 +189,13 @@ func SaveKLine1m(klines []KLine1m) error {
 		if len(tableKLines) > 0 {
 			symbol := tableKLines[0].Symbol
 			if err := CreateTableForSymbol(symbol); err != nil {
-				return fmt.Errorf("创建表失败: %w", err)
+				return result, fmt.Errorf("创建表失败: %w", err)
 			}
 		}
 
 		tx, err := DB.Begin()
 		if err != nil {
-			return err
+			return result, err
 		}
 
 		// 使用 INSERT IGNORE 避免重复数据（基于 UNIQUE KEY uk_open_time）
@@ -197,7 +206,7 @@ func SaveKLine1m(klines []KLine1m) error {
 		`, tableName))
 		if err != nil {
 			tx.Rollback()
-			return err
+			return result, err
 		}
 
 		insertedCount := 0
@@ -211,7 +220,7 @@ func SaveKLine1m(klines []KLine1m) error {
 				firstKline = &k
 			}
 
-			result, err := stmt.Exec(
+			execResult, err := stmt.Exec(
 				k.Symbol,
 				k.OpenTime,
 				k.Open,
@@ -229,7 +238,7 @@ func SaveKLine1m(klines []KLine1m) error {
 			}
 
 			// 检查是否实际插入了数据
-			rowsAffected, _ := result.RowsAffected()
+			rowsAffected, _ := execResult.RowsAffected()
 			if rowsAffected > 0 {
 				insertedCount++
 			} else {
@@ -239,8 +248,13 @@ func SaveKLine1m(klines []KLine1m) error {
 
 		stmt.Close()
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("提交事务失败: %w", err)
+			return result, fmt.Errorf("提交事务失败: %w", err)
 		}
+
+		// 累加统计信息
+		result.InsertedCount += insertedCount
+		result.SkippedCount += skippedCount
+		result.ErrorCount += errorCount
 
 		// 打印详细的批次统计信息
 		logger.Infof("表 %s 批次统计: 总数=%d, 成功插入=%d, 跳过(已存在)=%d, 失败=%d",
@@ -255,7 +269,7 @@ func SaveKLine1m(klines []KLine1m) error {
 		}
 	}
 
-	return nil
+	return result, nil
 }
 
 // GetLatestKLineTime 获取指定交易对的最新K线时间
@@ -356,6 +370,41 @@ func GetKLines1m(symbol string, startTime, endTime int64, limit int) ([]KLine1m,
 }
 
 // GetKLines1mByCount 获取最近N根1分钟K线
+// GetLatestKLine1m 获取最新的1分钟K线数据（单条）
+func GetLatestKLine1m(symbol string) (*KLine1m, error) {
+	tableName := GetTableName(symbol)
+
+	query := fmt.Sprintf(`
+		SELECT open_time, open, high, low, close, volume, close_time
+		FROM %s
+		ORDER BY open_time DESC
+		LIMIT 1
+	`, tableName)
+
+	row := DB.QueryRow(query)
+	
+	var k KLine1m
+	k.Symbol = symbol
+	err := row.Scan(
+		&k.OpenTime,
+		&k.Open,
+		&k.High,
+		&k.Low,
+		&k.Close,
+		&k.Volume,
+		&k.CloseTime,
+	)
+	if err != nil {
+		// 如果表不存在或没有数据，返回nil
+		if strings.Contains(err.Error(), "doesn't exist") || err.Error() == "sql: no rows in result set" {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return &k, nil
+}
+
 func GetKLines1mByCount(symbol string, count int) ([]KLine1m, error) {
 	tableName := GetTableName(symbol)
 
@@ -451,6 +500,35 @@ func AddSyncTimeRange(symbol string, startTime, endTime int64) error {
 	go mergeAdjacentRanges(symbol)
 
 	return nil
+}
+
+// IsDaySynced 检查指定日期是否已完整同步
+// dayStart: 当天的开始时间（00:00:00）
+// dayEnd: 当天的结束时间（23:59:59.999）
+func IsDaySynced(symbol string, dayStart, dayEnd int64) (bool, error) {
+	ranges, err := GetSyncTimeRanges(symbol)
+	if err != nil {
+		return false, err
+	}
+
+	// 检查是否有时间段完全覆盖这一天
+	for _, r := range ranges {
+		// 如果已同步的时间段完全覆盖了这一天，说明已同步
+		if r.StartTime <= dayStart && r.EndTime >= dayEnd {
+			return true, nil
+		}
+		// 如果已同步的时间段与这一天有重叠，且覆盖了大部分时间，也认为已同步
+		if r.StartTime <= dayStart && r.EndTime >= dayStart {
+			// 检查覆盖的时间比例（至少覆盖90%）
+			coveredTime := r.EndTime - dayStart
+			dayDuration := dayEnd - dayStart
+			if coveredTime >= dayDuration*90/100 {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
 }
 
 // GetSyncTimeRanges 获取指定币种的所有已同步时间段（按开始时间排序）
