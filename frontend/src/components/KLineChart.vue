@@ -230,8 +230,24 @@ export default {
       }
       
       // 获取当前dataZoom的范围
-      const option = chartInstance.getOption()
-      const dataZoom = option.dataZoom && option.dataZoom[0]
+      let option
+      try {
+        option = chartInstance.getOption()
+      } catch (e) {
+        console.warn('getOption() 失败:', e)
+        return
+      }
+      
+      // getOption() 可能返回 undefined、null、数组或对象，需要安全处理
+      if (!option) {
+        return
+      }
+      
+      const optionObj = Array.isArray(option) ? option[0] : option
+      if (!optionObj || !optionObj.dataZoom || !Array.isArray(optionObj.dataZoom) || optionObj.dataZoom.length === 0) {
+        return
+      }
+      const dataZoom = optionObj.dataZoom[0]
       if (!dataZoom) return
       
       const start = dataZoom.start || 0
@@ -317,9 +333,20 @@ export default {
       ]
       
       // 更新图表配置，添加markLine
-      const currentOption = chartInstance.getOption()
-      if (currentOption.series && currentOption.series[0]) {
-        currentOption.series[0].markLine = {
+      let currentOption
+      try {
+        currentOption = chartInstance.getOption()
+      } catch (e) {
+        console.warn('getOption() 失败:', e)
+        return
+      }
+      // getOption() 可能返回 undefined、null、数组或对象，需要安全处理
+      if (!currentOption) {
+        return
+      }
+      const currentOptionObj = Array.isArray(currentOption) ? currentOption[0] : currentOption
+      if (currentOptionObj && currentOptionObj.series && Array.isArray(currentOptionObj.series) && currentOptionObj.series[0]) {
+        currentOptionObj.series[0].markLine = {
           data: markLineData,
           label: {
             show: true,
@@ -331,7 +358,7 @@ export default {
           },
           symbol: ['none', 'none'], // 不显示起点和终点标记
         }
-        chartInstance.setOption(currentOption, { notMerge: false })
+        chartInstance.setOption(currentOptionObj, { notMerge: false })
       }
     }
 
@@ -341,8 +368,22 @@ export default {
       }
 
       // 在更新数据前，保存当前的dataZoom状态
-      const currentOption = chartInstance.getOption()
-      const currentDataZoom = currentOption.dataZoom && currentOption.dataZoom[0]
+      let currentOption
+      try {
+        currentOption = chartInstance.getOption()
+      } catch (e) {
+        console.warn('getOption() 失败:', e)
+        currentOption = null
+      }
+      // getOption() 可能返回 undefined、null、数组或对象，需要安全处理
+      if (!currentOption) {
+        // 如果获取失败，跳过保存 dataZoom 状态
+        currentOption = null
+      }
+      const currentOptionObj = currentOption ? (Array.isArray(currentOption) ? currentOption[0] : currentOption) : null
+      const currentDataZoom = currentOptionObj && currentOptionObj.dataZoom && Array.isArray(currentOptionObj.dataZoom) && currentOptionObj.dataZoom.length > 0
+        ? currentOptionObj.dataZoom[0]
+        : null
       
       // 检查用户是否在查看最新数据（end >= 99.5 表示接近末尾）
       if (currentDataZoom && currentDataZoom.end !== undefined && currentDataZoom.start !== undefined) {
@@ -678,7 +719,7 @@ export default {
                 const value = item.value
                 if (Array.isArray(value) && value.length >= 4) {
                   tooltip += `<div>${item.marker} ${item.seriesName}</div>`
-                  gengshi 
+                  tooltip += `<div style="padding-left: 10px;">开: ${formatValue(value[0])}</div>`
                   tooltip += `<div style="padding-left: 10px;">收: ${formatValue(value[1])}</div>`
                   tooltip += `<div style="padding-left: 10px;">低: ${formatValue(value[2])}</div>`
                   tooltip += `<div style="padding-left: 10px;">高: ${formatValue(value[3])}</div>`
@@ -790,7 +831,7 @@ export default {
             },
           },
         ],
-        // dataZoom 配置：首次初始化时设置，更新时通过 replaceMerge 保留
+        // dataZoom 配置：始终提供，避免 ECharts 内部访问 undefined
         dataZoom: isFirstInit ? [
           {
             type: 'inside',
@@ -814,7 +855,46 @@ export default {
               color: '#63b3ed',
             },
           },
-        ] : undefined, // 更新时不设置 dataZoom，使用 replaceMerge 保留
+        ] : (() => {
+          // 非首次初始化时，尝试从当前配置获取 dataZoom，如果不存在则使用默认值
+          try {
+            const currentOption = chartInstance.getOption()
+            if (currentOption) {
+              const currentOptionObj = Array.isArray(currentOption) ? currentOption[0] : currentOption
+              if (currentOptionObj && currentOptionObj.dataZoom && Array.isArray(currentOptionObj.dataZoom) && currentOptionObj.dataZoom.length > 0) {
+                // 返回当前的 dataZoom 配置，保持用户的位置
+                return currentOptionObj.dataZoom
+              }
+            }
+          } catch (e) {
+            console.warn('获取当前 dataZoom 失败:', e)
+          }
+          // 如果获取失败或不存在，返回默认配置（确保始终返回数组）
+          return [
+            {
+              type: 'inside',
+              xAxisIndex: [0, 1],
+              start: 80,
+              end: 100,
+            },
+            {
+              show: true,
+              xAxisIndex: [0, 1],
+              type: 'slider',
+              top: '90%',
+              start: 80,
+              end: 100,
+              textStyle: {
+                color: '#9ca3af',
+              },
+              borderColor: '#4a5568',
+              fillerColor: 'rgba(99, 179, 237, 0.2)',
+              handleStyle: {
+                color: '#63b3ed',
+              },
+            },
+          ]
+        })(),
         series: [
           {
             name: 'K线',
@@ -969,18 +1049,15 @@ export default {
         ],
       }
 
-      // 使用 replaceMerge 只替换 series 和 xAxis，完全保留 dataZoom 状态
-      // 这样数据更新时不会影响用户的视图位置
+      // 设置配置：使用 notMerge: false 来合并配置，保留用户的 dataZoom 状态
       const setOptionConfig = { 
-        notMerge: false,
+        notMerge: false, // 合并模式，会保留现有的 dataZoom 配置
         lazyUpdate: false 
       }
       
-      // 如果不是首次初始化，使用 replaceMerge 保留 dataZoom
-      if (!isFirstInit) {
-        setOptionConfig.replaceMerge = ['dataZoom'] // 保留 dataZoom，不替换
-      } else {
-        isFirstInit = false // 标记已完成首次初始化
+      // 标记已完成首次初始化
+      if (isFirstInit) {
+        isFirstInit = false
       }
       
       chartInstance.setOption(option, setOptionConfig)

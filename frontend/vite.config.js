@@ -16,6 +16,8 @@ export default defineConfig({
       host: 'localhost',
       clientPort: 34115, // 客户端连接端口
       overlay: true, // 显示错误覆盖层
+      // 确保 WebView 可以连接到 HMR
+      path: '/',
     },
     // 确保开发服务器可以被外部访问
     open: false, // 不自动打开浏览器

@@ -1,6 +1,6 @@
 <template>
   <header class="app-header">
-    <h1>数据分析</h1>
+    <h1>数据分析225577</h1>
     <div class="controls">
       <select v-model="localSymbol" @change="handleSymbolChange" class="symbol-select">
         <option value="BTCUSDT">BTC/USDT</option>
